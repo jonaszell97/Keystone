@@ -24,8 +24,8 @@ extension KeystoneClient {
     /// Create an event without submitting it.
     public func createEvent(category: String, data: [String: KeystoneEventData]) -> KeystoneEvent {
         KeystoneEvent(id: UUID(),
-                       analyticsId: config.userIdentifier,
-                       category: category, date: Date(), data: data)
+                      userId: config.userIdentifier,
+                      category: category, date: KeystoneAnalyzer.now, data: data)
     }
     
     /// Submit an event.

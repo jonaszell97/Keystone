@@ -4,9 +4,6 @@ import Foundation
 // MARK: Calendar
 
 internal extension Calendar {
-    /// Shortcut for the gregorian calendar.
-    static let gregorian: Calendar = Calendar(identifier: .gregorian)
-    
     /// Shortcut for the gregorian calendar with the UTC time zone.
     static let reference: Calendar = {
         var calendar = Calendar(identifier: .gregorian)
@@ -22,7 +19,7 @@ internal extension TimeZone {
 }
 
 
-internal extension Date {
+extension Date {
     fileprivate static let secondsPerDay: TimeInterval = 24 * 60 * 60
     
     /// - returns: A date representing the start of the day this date is in.
@@ -31,10 +28,9 @@ internal extension Date {
         return Calendar.reference.date(from: components)!
     }
     
-    /// - returns: This date converted to a different time zone.
-    func convertToTimeZone(initTimeZone: TimeZone = .init(secondsFromGMT: 0)!, timeZone: TimeZone) -> Date {
-        let delta = TimeInterval(timeZone.secondsFromGMT(for: self) - initTimeZone.secondsFromGMT(for: self))
-        return addingTimeInterval(delta)
+    /// - returns: A date representing the end of the day this date is in.
+    var endOfDay: Date {
+        startOfDay.addingTimeInterval(23*60*60 + 59*60 + 59)
     }
     
     /// - returns: A date representing the start of the month this date is in.
@@ -45,7 +41,41 @@ internal extension Date {
     
     /// - returns: A date representing the end of the month this date is in.
     var endOfMonth: Date {
-        Calendar.reference.date(byAdding: DateComponents(month: 1, day: -1), to: self.startOfMonth)!
+        Calendar.reference.date(byAdding: DateComponents(month: 1, second: -1), to: self.startOfMonth)!
+    }
+    
+    public enum FirstDayOfWeek {
+        case sunday, monday
+    }
+    
+    /// - returns: A date representing the start of the week this date is in.
+    func startOfWeek(weekStartsOn firstWeekday: FirstDayOfWeek) -> Date {
+        let components = Calendar.reference.dateComponents([.year, .month, .day, .weekday], from: self)
+        let desiredWeekday: Int
+        
+        switch firstWeekday {
+        case .sunday:
+            desiredWeekday = 1
+        case .monday:
+            desiredWeekday = 2
+        }
+        
+        let weekday = components.weekday!
+        let difference: Int
+        
+        if desiredWeekday > weekday {
+            difference = -7 + (desiredWeekday - weekday)
+        }
+        else {
+            difference = desiredWeekday - weekday
+        }
+        
+        return Calendar.reference.date(from: components)!.addingTimeInterval(24*60*60*TimeInterval(difference))
+    }
+    
+    /// - returns: A date representing the end of the week this date is in.
+    func endOfWeek(weekStartsOn firstWeekday: FirstDayOfWeek) -> Date {
+        startOfWeek(weekStartsOn: firstWeekday).addingTimeInterval(7*24*60*60 - 1)
     }
 }
 

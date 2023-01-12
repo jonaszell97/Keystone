@@ -44,28 +44,47 @@ public final class CloudKitBackend: KeystoneBackend {
     /// The iCloud container.
     let container: CKContainer
     
+    /// The name of the column identifying user IDs.
+    let userIdColumnName: String
+    
+    /// The user's iCloud account status.
+    public let accountStatus: CKAccountStatus
+    
     /// The unique iCloud record ID for the user.
-    var iCloudRecordID: String?
+    let iCloudRecordID: String?
     
     /// Default initializer.
     public init(config: KeystoneConfig,
                 containerIdentifier: String,
-                tableName: String) {
+                tableName: String,
+                userIdColumnName: String = "userId") async {
         self.config = config
         self.containerIdentifier = containerIdentifier
         self.tableName = tableName
+        self.userIdColumnName = userIdColumnName
         
-        self.container = .init(identifier: containerIdentifier)
-        self.iCloudRecordID = nil
+        let container = CKContainer(identifier: containerIdentifier)
+        self.container = container
         
-        self.container.fetchUserRecordID(completionHandler: { (recordID, error) in
-            if let error {
-                config.log?(.fault, "error fetching user record id: \(error.localizedDescription)")
-                return
+        self.iCloudRecordID = await withCheckedContinuation { continuation in
+            container.fetchUserRecordID(completionHandler: { (recordID, error) in
+                if let error {
+                    config.log?(.fault, "error fetching user record id: \(error.localizedDescription)")
+                }
+                
+                continuation.resume(returning: recordID?.recordName)
+            })
+        }
+        
+        self.accountStatus = await withCheckedContinuation { continuation in
+            container.accountStatus { status, error in
+                if let error {
+                    config.log?(.error, "error fetching account status: \(error.localizedDescription)")
+                }
+                
+                continuation.resume(returning: status)
             }
-            
-            self.iCloudRecordID = recordID?.recordName
-        })
+        }
     }
 }
 
@@ -74,6 +93,11 @@ public final class CloudKitBackend: KeystoneBackend {
 extension CloudKitBackend {
     /// Submit an event to CloudKit.
     public func persist(event: KeystoneEvent) async throws {
+        guard case .available = self.accountStatus else {
+            config.log?(.debug, "early exit in persist(event:) because account status is \(self.accountStatus)")
+            throw CKError(.accountTemporarilyUnavailable)
+        }
+        
         let record = CKRecord(recordType: self.tableName, recordID: .init(recordName: event.id.uuidString))
         try populateRecord(record, for: event)
         
@@ -88,6 +112,11 @@ extension CloudKitBackend {
     public func loadEvents(in interval: DateInterval, updateStatus: @escaping (BackendStatus) -> Void)
         async throws -> [KeystoneEvent]
     {
+        guard case .available = self.accountStatus else {
+            config.log?(.debug, "early exit in loadEvents(in:updateStatus) because account status is \(self.accountStatus)")
+            throw CKError(.accountTemporarilyUnavailable)
+        }
+        
         let records = try await self.loadNewRecords(in: interval) { loadedRecords in
             updateStatus(.fetchedRecords(count: loadedRecords))
         }
@@ -99,6 +128,11 @@ extension CloudKitBackend {
     
     /// Load all events.
     public func loadAllEvents(updateStatus: @escaping (BackendStatus) -> Void) async throws -> [KeystoneEvent] {
+        guard case .available = self.accountStatus else {
+            config.log?(.debug, "early exit in loadAllEvents(updateStatus:) because account status is \(self.accountStatus)")
+            throw CKError(.accountTemporarilyUnavailable)
+        }
+        
         let records = try await self.loadNewRecords() { loadedRecords in
             updateStatus(.fetchedRecords(count: loadedRecords))
         }
@@ -146,12 +180,7 @@ extension CloudKitBackend {
     
     /// Load all records created after a given date.
     private func loadNewRecords(in interval: DateInterval, updateProgress: @escaping (Int) -> Void) async throws -> [CKRecord] {
-        let eventDateQuery = "eventDate >= %@ AND eventDate <= %@"
-        let creationDateQuery = "creationDate >= %@ AND creationDate <= %@"
-        
-        let predicate = NSPredicate(format: "(\(eventDateQuery)) OR (\(creationDateQuery))",
-                                    NSDate(timeIntervalSinceReferenceDate: interval.start.timeIntervalSinceReferenceDate),
-                                    NSDate(timeIntervalSinceReferenceDate: interval.end.timeIntervalSinceReferenceDate),
+        let predicate = NSPredicate(format: "eventDate >= %@ AND eventDate <= %@",
                                     NSDate(timeIntervalSinceReferenceDate: interval.start.timeIntervalSinceReferenceDate),
                                     NSDate(timeIntervalSinceReferenceDate: interval.end.timeIntervalSinceReferenceDate))
         
@@ -304,7 +333,7 @@ extension CloudKitBackend {
                 event.data, .init(codingPath: [], debugDescription: "encoding event data failed!"))
         }
         
-        record["analyticsID"] = config.userIdentifier
+        record[self.userIdColumnName] = config.userIdentifier
         record["category"] = event.category
         record["eventData"] = json
         record["eventDate"] = event.date
@@ -321,11 +350,11 @@ extension CloudKitBackend {
             )
         }
         
-        guard let analyticsId = record["analyticsID"] as? String else {
+        guard let userId = record[self.userIdColumnName] as? String else {
             throw DecodingError.dataCorrupted(
                 DecodingError.Context(
                     codingPath: [],
-                    debugDescription: "KeystoneEvent is missing analyticsId"
+                    debugDescription: "KeystoneEvent is missing userId"
                 )
             )
         }
@@ -368,10 +397,10 @@ extension CloudKitBackend {
         
         let data = try JSONDecoder().decode([String: KeystoneEventData].self, from: eventData)
         return KeystoneEvent(id: id,
-                              analyticsId: analyticsId,
-                              category: category,
-                              date: eventDate,
-                              data: data)
+                             userId: userId,
+                             category: category,
+                             date: eventDate,
+                             data: data)
     }
 }
 

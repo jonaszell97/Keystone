@@ -22,6 +22,9 @@ let package = Package(
             dependencies: []),
         .testTarget(
             name: "KeystoneTests",
-            dependencies: ["Keystone"]),
+            dependencies: ["Keystone"],
+            swiftSettings: [
+                .define("TESTING"),
+            ]),
     ]
 )
