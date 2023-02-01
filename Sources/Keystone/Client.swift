@@ -32,4 +32,9 @@ extension KeystoneClient {
     public func submitEvent(_ event: KeystoneEvent) async throws {
         try await backend.persist(event: event)
     }
+    
+    /// Submit multiple events at once.
+    public func submitEvents(_ events: [KeystoneEvent]) async throws {
+        try await backend.persist(events: events)
+    }
 }

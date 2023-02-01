@@ -411,6 +411,9 @@ open class GroupingAggregator: EventAggregator {
     /// The grouped values.
     public var groupedValues: [KeystoneEventData: [KeystoneEvent]]
     
+    /// The total event count.
+    public var totalEventCount: Int { groupedValues.values.reduce(0) { $0 + $1.count } }
+    
     /// Default initializer.
     public init(groupedValues: [KeystoneEventData: [KeystoneEvent]] = [:]) {
         self.groupedValues = groupedValues
@@ -454,6 +457,9 @@ open class CountingByGroupAggregator: EventAggregator {
     /// The grouped values.
     public var groupedValues: [KeystoneEventData: Int]
     
+    /// The total event count.
+    public var totalEventCount: Int { groupedValues.values.reduce(0) { $0 + $1 } }
+    
     /// Default initializer.
     public init(groupedValues: [KeystoneEventData: Int] = [:]) {
         self.groupedValues = groupedValues
@@ -493,21 +499,59 @@ open class CountingByGroupAggregator: EventAggregator {
 
 // MARK: DateAggregator
 
+public enum DateAggregatorScope: String {
+    /// Group values by hour.
+    case hour
+    
+    /// Group values by day.
+    case day
+    
+    /// Group values by week.
+    case week
+    
+    /// Group values by month.
+    case month
+    
+    /// Group values by year.
+    case year
+}
+
+internal extension DateAggregatorScope {
+    func scopeStartDate(from date: Date) -> Date {
+        switch self {
+        case .hour:
+            let components = Calendar.reference.dateComponents([.year,.month,.day,.hour], from: date)
+            return Calendar.reference.date(from: components)!
+        case .day:
+            return date.startOfDay
+        case .week:
+            return date.startOfWeek(weekStartsOn: .monday)
+        case .month:
+            return date.startOfMonth
+        case .year:
+            return date.startOfYear
+        }
+    }
+}
+
 open class DateAggregator: EventAggregator {
     /// The date components kept for keying.
-    public let components: Set<Calendar.Component>
+    public let scope: DateAggregatorScope
     
     /// The grouped values.
-    public var groupedValues: [DateComponents: [KeystoneEvent]]
+    public var groupedValues: [Date: [KeystoneEvent]]
+    
+    /// The total event count.
+    public var totalEventCount: Int { groupedValues.values.reduce(0) { $0 + $1.count } }
     
     /// Default initializer.
-    public init(components: Set<Calendar.Component>, groupedValues: [DateComponents: [KeystoneEvent]] = [:]) {
-        self.components = components
+    public init(scope: DateAggregatorScope, groupedValues: [Date: [KeystoneEvent]] = [:]) {
+        self.scope = scope
         self.groupedValues = groupedValues
     }
     
     open func addEvent(_ event: KeystoneEvent, column: EventColumn?) -> EventProcessingResult {
-        let key = Calendar.reference.dateComponents(components, from: event.date)
+        let key = scope.scopeStartDate(from: event.date)
         self.groupedValues.modify(key: key, defaultValue: []) { $0.append(event) }
         
         return .keep
@@ -527,7 +571,7 @@ open class DateAggregator: EventAggregator {
     
     /// Decode this aggregator's state from a given Data value.
     open func decode(from data: Data) throws {
-        self.groupedValues = try JSONDecoder().decode([DateComponents: [KeystoneEvent]].self, from: data)
+        self.groupedValues = try JSONDecoder().decode([Date: [KeystoneEvent]].self, from: data)
     }
     
     public var valueCount: Int { self.groupedValues.values.reduce(0) { $0 + $1.count } }
@@ -537,19 +581,22 @@ open class DateAggregator: EventAggregator {
 
 open class CountingByDateAggregator: EventAggregator {
     /// The date components kept for keying.
-    public let components: Set<Calendar.Component>
+    public let scope: DateAggregatorScope
     
     /// The grouped values.
-    public var groupedValues: [DateComponents: Int]
+    public var groupedValues: [Date: Int]
+    
+    /// The total event count.
+    public var totalEventCount: Int { groupedValues.values.reduce(0) { $0 + $1 } }
     
     /// Default initializer.
-    public init(components: Set<Calendar.Component>, groupedValues: [DateComponents: Int] = [:]) {
-        self.components = components
+    public init(scope: DateAggregatorScope, groupedValues: [Date: Int] = [:]) {
+        self.scope = scope
         self.groupedValues = groupedValues
     }
     
     open func addEvent(_ event: KeystoneEvent, column: EventColumn?) -> EventProcessingResult {
-        let key = Calendar.reference.dateComponents(components, from: event.date)
+        let key = scope.scopeStartDate(from: event.date)
         self.groupedValues.modify(key: key, defaultValue: 0) { $0 += 1 }
         
         return .keep
@@ -569,10 +616,56 @@ open class CountingByDateAggregator: EventAggregator {
     
     /// Decode this aggregator's state from a given Data value.
     open func decode(from data: Data) throws {
-        self.groupedValues = try JSONDecoder().decode([DateComponents: Int].self, from: data)
+        self.groupedValues = try JSONDecoder().decode([Date: Int].self, from: data)
     }
     
     public var valueCount: Int { self.groupedValues.values.reduce(0) { $0 + $1 } }
+}
+
+// MARK: DuplicateEventChecker
+
+public final class DuplicateEventChecker {
+    /// The IDs of all events that were encountered so far by this aggregator.
+    var encounteredEvents: Set<UUID> = []
+    
+    /// The number of duplicates that were found.
+    var encounteredDuplicates: Int = 0
+    
+    /// Default initializer.
+    public init() { }
+}
+
+extension DuplicateEventChecker: EventAggregator {
+    public func addEvent(_ event: KeystoneEvent, column: EventColumn?) -> EventProcessingResult {
+        guard !encounteredEvents.insert(event.id).inserted else {
+            return .keep
+        }
+        
+        encounteredDuplicates += 1
+        return .keep
+    }
+    
+    private struct CodableState: Codable {
+        let encounteredEvents: Set<UUID>
+        let encounteredDuplicates: Int
+    }
+    
+    public func encode() throws -> Data? {
+        try JSONEncoder().encode(CodableState(encounteredEvents: encounteredEvents, encounteredDuplicates: encounteredDuplicates))
+    }
+    
+    public func decode(from data: Data) throws {
+        let state = try JSONDecoder().decode(CodableState.self, from: data)
+        self.encounteredEvents = state.encounteredEvents
+        self.encounteredDuplicates = state.encounteredDuplicates
+    }
+    
+    public func reset() {
+        encounteredEvents.removeAll()
+        encounteredDuplicates = 0
+    }
+    
+    public var debugDescription: String { "DuplicateEventChecker(\(encounteredDuplicates) duplicates)" }
 }
 
 // MARK: Compound aggregators

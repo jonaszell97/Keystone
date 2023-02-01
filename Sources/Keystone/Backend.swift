@@ -13,8 +13,11 @@ public enum BackendStatus {
 }
 
 public protocol KeystoneBackend {
-    /// Persist an event ot the backend.
+    /// Persist an event to the backend.
     func persist(event: KeystoneEvent) async throws
+    
+    /// Persist a list of events to the backend.
+    func persist(events: [KeystoneEvent]) async throws
     
     /// Load all events.
     func loadAllEvents(updateStatus: @escaping (BackendStatus) -> Void) async throws -> [KeystoneEvent]
@@ -28,6 +31,13 @@ public extension KeystoneBackend {
     /// Load all events.
     func loadAllEvents(updateStatus: @escaping (BackendStatus) -> Void) async throws -> [KeystoneEvent] {
         try await self.loadEvents(in: .init(start: .distantPast, end: .distantFuture), updateStatus: updateStatus)
+    }
+    
+    /// Persist a list of events to the backend.
+    func persist(events: [KeystoneEvent]) async throws {
+        for event in events {
+            try await self.persist(event: event)
+        }
     }
 }
 
@@ -51,13 +61,13 @@ public final class CloudKitBackend: KeystoneBackend {
     public let accountStatus: CKAccountStatus
     
     /// The unique iCloud record ID for the user.
-    let iCloudRecordID: String?
+    let iCloudRecordID: String
     
     /// Default initializer.
     public init(config: KeystoneConfig,
                 containerIdentifier: String,
                 tableName: String,
-                userIdColumnName: String = "userId") async {
+                userIdColumnName: String = "userId") async throws {
         self.config = config
         self.containerIdentifier = containerIdentifier
         self.tableName = tableName
@@ -66,17 +76,23 @@ public final class CloudKitBackend: KeystoneBackend {
         let container = CKContainer(identifier: containerIdentifier)
         self.container = container
         
-        self.iCloudRecordID = await withCheckedContinuation { continuation in
+        let iCloudRecordID: String = try await withCheckedThrowingContinuation { continuation in
             container.fetchUserRecordID(completionHandler: { (recordID, error) in
                 if let error {
-                    config.log?(.fault, "error fetching user record id: \(error.localizedDescription)")
+                    continuation.resume(throwing: error)
+                    return
                 }
                 
-                continuation.resume(returning: recordID?.recordName)
+                guard let id = recordID?.recordName else {
+                    continuation.resume(throwing: CKError(.notAuthenticated))
+                    return
+                }
+                
+                continuation.resume(returning: id)
             })
         }
         
-        self.accountStatus = await withCheckedContinuation { continuation in
+        let accountStatus = await withCheckedContinuation { continuation in
             container.accountStatus { status, error in
                 if let error {
                     config.log?(.error, "error fetching account status: \(error.localizedDescription)")
@@ -85,6 +101,24 @@ public final class CloudKitBackend: KeystoneBackend {
                 continuation.resume(returning: status)
             }
         }
+        
+        switch accountStatus {
+        case .available:
+            fallthrough
+        case .temporarilyUnavailable:
+            break
+        case .couldNotDetermine:
+            fallthrough
+        case .noAccount:
+            fallthrough
+        case .restricted:
+            fallthrough
+        @unknown default:
+            throw CKError(.notAuthenticated)
+        }
+        
+        self.iCloudRecordID = iCloudRecordID
+        self.accountStatus = accountStatus
     }
 }
 
@@ -103,6 +137,28 @@ extension CloudKitBackend {
         
         try await container.publicCloudDatabase.save(record)
     }
+    
+    /// Submit multiple events to CloudKit.
+    public func persist(events: [KeystoneEvent]) async throws {
+        guard case .available = self.accountStatus else {
+            config.log?(.debug, "early exit in persist(event:) because account status is \(self.accountStatus)")
+            throw CKError(.accountTemporarilyUnavailable)
+        }
+        
+        let records = try events.map { event in
+            let record = CKRecord(recordType: self.tableName, recordID: .init(recordName: event.id.uuidString))
+            try populateRecord(record, for: event)
+            
+            return record
+        }
+        
+        let (saveResults, _) = try await container.publicCloudDatabase.modifyRecords(saving: records, deleting: [])
+        for (id, result) in saveResults {
+            if case .failure(let error) = result {
+                config.log?(.error, "error saving record with ID \(id): \(error.localizedDescription)")
+            }
+        }
+    }
 }
 
 // MARK: Fetch events
@@ -116,6 +172,8 @@ extension CloudKitBackend {
             config.log?(.debug, "early exit in loadEvents(in:updateStatus) because account status is \(self.accountStatus)")
             throw CKError(.accountTemporarilyUnavailable)
         }
+        
+        config.log?(.debug, "[CloudKitBackend] fetching events in interval \(interval)")
         
         let records = try await self.loadNewRecords(in: interval) { loadedRecords in
             updateStatus(.fetchedRecords(count: loadedRecords))
@@ -132,6 +190,8 @@ extension CloudKitBackend {
             config.log?(.debug, "early exit in loadAllEvents(updateStatus:) because account status is \(self.accountStatus)")
             throw CKError(.accountTemporarilyUnavailable)
         }
+        
+        config.log?(.debug, "[CloudKitBackend] fetching all events")
         
         let records = try await self.loadNewRecords() { loadedRecords in
             updateStatus(.fetchedRecords(count: loadedRecords))
@@ -237,9 +297,10 @@ extension CloudKitBackend {
         
         var queryCompletion: Optional<(Result<CKQueryOperation.Cursor?, Error>) -> Void> = nil
         queryCompletion = { result in
-            let data = data.map { $0 }
-            let queryCompletion = queryCompletion
+            let localData = data
+            data.removeAll()
             
+            let queryCompletion = queryCompletion
             Task { @MainActor in
                 if case .failure(let error) = result {
                     _ = receiveResults(nil, error, false)
@@ -251,7 +312,7 @@ extension CloudKitBackend {
                     return
                 }
                 
-                let shouldContinue = receiveResults(data, nil, true)
+                let shouldContinue = receiveResults(localData, nil, true)
                 guard shouldContinue else {
                     return
                 }

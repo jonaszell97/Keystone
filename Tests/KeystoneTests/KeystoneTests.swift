@@ -25,18 +25,18 @@ import XCTest
         ]
         
         builder.registerAllEventAggregator(id: "All Event Count") { CountingAggregator() }
-        builder.registerAllEventAggregator(id: "All Event Count By Month") { CountingByDateAggregator(components: [.month]) }
+        builder.registerAllEventAggregator(id: "All Event Count By Month") { CountingByDateAggregator(scope: .month) }
         
         builder.registerCategory(name: "numericEvent") { category in
             category.registerAggregator(id: "numericEvent Count") { CountingAggregator() }
-            category.registerColumn(name: "numericValueA", aggregators: ["numericValueA Stats": { NumericStatsAggregator() }])
-            category.registerColumn(name: "numericValueB", aggregators: ["numericValueB Stats": { NumericStatsAggregator() }])
+            category.registerColumn(name: "numericValueA") { $0.registerAggregator(id: "numericValueA Stats") { NumericStatsAggregator() } }
+            category.registerColumn(name: "numericValueB") { $0.registerAggregator(id: "numericValueB Stats") { NumericStatsAggregator() } }
         }
         
         builder.registerCategory(name: "textEvent") { category in
             category.registerAggregator(id: "textEvent Count") { CountingAggregator() }
-            category.registerColumn(name: "textValueA", aggregators: ["textValueA Count By Group": { CountingByGroupAggregator() }])
-            category.registerColumn(name: "textValueB", aggregators: ["textValueB Count By Date": { CountingByDateAggregator(components: [.day]) }])
+            category.registerColumn(name: "textValueA") { $0.registerAggregator(id: "textValueA Count By Group") { CountingByGroupAggregator() } }
+            category.registerColumn(name: "textValueB") { $0.registerAggregator(id: "textValueB Count By Date") { CountingByDateAggregator(scope: .day) } }
         }
         
         let builder = MockEventBuilder(userCount: userCount, eventCategories: eventCategories, using: &rng)
@@ -44,7 +44,7 @@ import XCTest
     }
     
     func testBasicAggregators() async {
-        KeystoneAnalyzer.fixedNowDate = Self.date(from: "2023-01-15T00:00:00+0000")
+        KeystoneAnalyzer.setNowDate(Self.date(from: "2023-01-15T00:00:00+0000"))
         
         let config = KeystoneConfig(userIdentifier: "ABC")
         let backend = MockBackend()
@@ -69,7 +69,7 @@ import XCTest
         var numericEvent_Cnt = 0
         
         var textValueA_Cnts = [KeystoneEventData: Int]()
-        var textValueB_Cnts = [DateComponents: Int]()
+        var textValueB_Cnts = [Date: Int]()
         var textEvent_Cnt = 0
         
         for event in events {
@@ -92,7 +92,7 @@ import XCTest
                 }
                 if let valueB = event.data["textValueB"]?.stringValue {
                     _ = valueB
-                    let key = Calendar.reference.dateComponents([.day], from: event.date)
+                    let key = DateAggregatorScope.day.scopeStartDate(from: event.date)
                     textValueB_Cnts.modify(key: key, defaultValue: 0) { $0 += 1 }
                 }
                 
@@ -138,7 +138,7 @@ import XCTest
     }
     
     func testBasicAggregatorsWithReload() async {
-        KeystoneAnalyzer.fixedNowDate = Self.date(from: "2023-01-15T00:00:00+0000")
+        KeystoneAnalyzer.setNowDate(Self.date(from: "2023-01-15T00:00:00+0000"))
         
         let config = KeystoneConfig(userIdentifier: "ABC")
         let backend = MockBackend()
@@ -163,7 +163,7 @@ import XCTest
         var numericEvent_Cnt = 0
         
         var textValueA_Cnts = [KeystoneEventData: Int]()
-        var textValueB_Cnts = [DateComponents: Int]()
+        var textValueB_Cnts = [Date: Int]()
         var textEvent_Cnt = 0
         
         for event in events {
@@ -186,7 +186,7 @@ import XCTest
                 }
                 if let valueB = event.data["textValueB"]?.stringValue {
                     _ = valueB
-                    let key = Calendar.reference.dateComponents([.day], from: event.date)
+                    let key = DateAggregatorScope.day.scopeStartDate(from: event.date)
                     textValueB_Cnts.modify(key: key, defaultValue: 0) { $0 += 1 }
                 }
                 
@@ -237,7 +237,7 @@ import XCTest
     }
     
     func testNewAggregators() async {
-        KeystoneAnalyzer.fixedNowDate = Self.date(from: "2023-01-15T00:00:00+0000")
+        KeystoneAnalyzer.setNowDate(Self.date(from: "2023-01-15T00:00:00+0000"))
         
         let config = KeystoneConfig(userIdentifier: "ABC")
         let backend = MockBackend()
@@ -299,7 +299,7 @@ import XCTest
         backend.mockEvents = events
         
         let batches = [events.prefix { $0.date <= splitDate }, events.filter { $0.date > splitDate }]
-        KeystoneAnalyzer.fixedNowDate = splitDate
+        KeystoneAnalyzer.setNowDate(splitDate)
         
         var analyzer = try! await builder.build()
         
@@ -311,7 +311,7 @@ import XCTest
         var numericEvent_Cnt = 0
         
         var textValueA_Cnts = [KeystoneEventData: Int]()
-        var textValueB_Cnts = [DateComponents: Int]()
+        var textValueB_Cnts = [Date: Int]()
         var textEvent_Cnt = 0
         
         for batch in batches {
@@ -337,7 +337,7 @@ import XCTest
                     }
                     if let valueB = event.data["textValueB"]?.stringValue {
                         _ = valueB
-                        let key = Calendar.reference.dateComponents([.day], from: event.date)
+                        let key = DateAggregatorScope.day.scopeStartDate(from: event.date)
                         textValueB_Cnts.modify(key: key, defaultValue: 0) { $0 += 1 }
                     }
                     
@@ -380,13 +380,13 @@ import XCTest
             }
             
             // Reload the analyzer
-            KeystoneAnalyzer.fixedNowDate = eventInterval.end
+            KeystoneAnalyzer.setNowDate(eventInterval.end)
             analyzer = try! await builder.build()
         }
     }
     
     func testEventLoading() async {
-        KeystoneAnalyzer.fixedNowDate = Self.date(from: "2023-02-07T23:59:59+0000")
+        KeystoneAnalyzer.setNowDate(Self.date(from: "2023-02-07T23:59:59+0000"))
         
         let config = KeystoneConfig(userIdentifier: "ABC")
         let backend = MockBackend()
@@ -407,34 +407,34 @@ import XCTest
         let analyzer = try! await builder.build()
         
         // Normal interval
-        let currentEventCount = await analyzer.loadEvents(in: KeystoneAnalyzer.currentEventInterval)?.count
+        let currentEventCount = await analyzer.getProcessedEvents(in: KeystoneAnalyzer.currentEventInterval)?.count
         XCTAssertEqual(500, currentEventCount)
         
-        let previousEventCount = await analyzer.loadEvents(in: KeystoneAnalyzer.interval(before: KeystoneAnalyzer.currentEventInterval))?.count
+        let previousEventCount = await analyzer.getProcessedEvents(in: KeystoneAnalyzer.interval(before: KeystoneAnalyzer.currentEventInterval))?.count
         XCTAssertEqual(500, previousEventCount)
         
-        let previous2EventCount = await analyzer.loadEvents(in: KeystoneAnalyzer.interval(before:
-                                                                                            KeystoneAnalyzer.interval(before: KeystoneAnalyzer.currentEventInterval)))?.count
+        let previous2EventCount = await analyzer.getProcessedEvents(in:
+            KeystoneAnalyzer.interval(before: KeystoneAnalyzer.interval(before: KeystoneAnalyzer.currentEventInterval)))?.count
         XCTAssertNil(previous2EventCount)
         
         // Weekly interval
-        let currentWeek = KeystoneAnalyzer.weekInterval(containing: KeystoneAnalyzer.now, weekStartsOn: .monday)
-        let currentWeekEventCount = await analyzer.loadEvents(in: currentWeek)!.count
+        let currentWeek = KeystoneAnalyzer.weekInterval(containing: KeystoneAnalyzer.now, weekStartsOnMonday: true)
+        let currentWeekEventCount = await analyzer.getProcessedEvents(in: currentWeek)!.count
         XCTAssertLessThan(abs((2.0 / 14.0) * 1_000 - Double(currentWeekEventCount)), 1)
         
-        let lastWeek = KeystoneAnalyzer.weekInterval(before: currentWeek, weekStartsOn: .monday)
-        let lastWeekEventCount = await analyzer.loadEvents(in: lastWeek)!.count
+        let lastWeek = KeystoneAnalyzer.weekInterval(before: currentWeek, weekStartsOnMonday: true)
+        let lastWeekEventCount = await analyzer.getProcessedEvents(in: lastWeek)!.count
         XCTAssertLessThan(abs((7.0 / 14.0) * 1_000 - Double(lastWeekEventCount)), 1)
         
-        let twoWeeksAgo = KeystoneAnalyzer.weekInterval(before: lastWeek, weekStartsOn: .monday)
-        let twoWeeksAgoEventCount = await analyzer.loadEvents(in: twoWeeksAgo)!.count
+        let twoWeeksAgo = KeystoneAnalyzer.weekInterval(before: lastWeek, weekStartsOnMonday: true)
+        let twoWeeksAgoEventCount = await analyzer.getProcessedEvents(in: twoWeeksAgo)!.count
         XCTAssertLessThan(abs((5.0 / 14.0) * 1_000 - Double(twoWeeksAgoEventCount)), 1)
         
         // Daily interval
         for i in 0..<14 {
             let day = eventInterval.start.addingTimeInterval(TimeInterval(i)*24*60*60)
             let interval = DateInterval(start: day.startOfDay, end: day.endOfDay)
-            let eventCount = await analyzer.loadEvents(in: interval)!.count
+            let eventCount = await analyzer.getProcessedEvents(in: interval)!.count
             XCTAssertLessThan(abs((1.0 / 14.0) * 1_000 - Double(eventCount)), 1)
         }
     }

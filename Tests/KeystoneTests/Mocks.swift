@@ -103,6 +103,31 @@ internal final class MockEventBuilder {
     }
 }
 
+internal final class TestDataBackend: KeystoneBackend {
+    /// The loaded events.
+    var events: [KeystoneEvent]
+    
+    init() {
+        self.events = []
+    }
+    
+    func initialize() async throws {
+        guard let data: Data = Data(base64Encoded: _testEvents) else {
+            fatalError("decoding test events failed")
+        }
+        
+        self.events = try JSONDecoder().decode([KeystoneEvent].self, from: data)
+    }
+    
+    func persist(event: KeystoneEvent) async throws { }
+    
+    func loadEvents(in interval: DateInterval, updateStatus: @escaping (BackendStatus) -> Void) async throws
+    -> [KeystoneEvent]
+    {
+        self.events.filter { interval.contains($0.date) }
+    }
+}
+
 // Adapted from Swift.Tensorflow
 internal struct ARC4RandomNumberGenerator: RandomNumberGenerator, Codable {
     var state: [UInt8] = Array(0...255)

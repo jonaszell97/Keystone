@@ -79,7 +79,7 @@ extension IntervalAggregatorState {
         KeystoneAggregatorState(interval: interval,
                                 processedEventInterval: self.processedEventInterval,
                                 eventCount: self.eventCount,
-                                knownAggregators: knownAggregators,
+                                knownAggregators: Set(aggregators.keys),
                                 aggregators: try aggregators.map { .init(id: $0.key, data: try $0.value.final.encode()) })
     }
     
@@ -134,7 +134,7 @@ public struct KeystoneAggregatorState {
     
     /// The unique key for this state.
     public static func key(for interval: DateInterval) -> String {
-        "analytics-state-\(self.formatDate(interval.start))-\(self.formatDate(interval.end))"
+        "state-\(self.formatDate(interval.start))-\(self.formatDate(interval.end))"
     }
     
     /// Memberwise initializer.
