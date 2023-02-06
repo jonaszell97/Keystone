@@ -1,28 +1,45 @@
 
 import CloudKit
 
+/// The status of a ``KeystoneBackend``.
 public enum BackendStatus {
     /// The backend is ready.
     case ready
     
-    /// The backend fetched a given number of records.
+    /// The backend has fetched a given number of records.
     case fetchedRecords(count: Int)
     
     /// The backend is processing records.
     case processingRecords(progress: Double)
 }
 
+/// Responsible for persisting and fetching events.
+///
+/// The backend is invoked by ``KeystoneClient`` instances to persist new events, and by the
+/// ``KeystoneAnalyzer`` to fetch previously persisted events.
 public protocol KeystoneBackend {
     /// Persist an event to the backend.
+    ///
+    /// - Parameter event: The event to persist.
     func persist(event: KeystoneEvent) async throws
     
     /// Persist a list of events to the backend.
+    ///
+    /// - Parameter event: The events to persist.
     func persist(events: [KeystoneEvent]) async throws
     
-    /// Load all events.
+    /// Load all events that have ever been persisted.
+    ///
+    /// - Parameter updateStatus: Closure invoked periodically with the current status of the backend.
+    /// - Returns: A list of all events ever created.
     func loadAllEvents(updateStatus: @escaping (BackendStatus) -> Void) async throws -> [KeystoneEvent]
     
-    /// Load events starting from a date.
+    /// Load all events whose creation date is within a given time interval.
+    ///
+    /// - Parameters:
+    ///   - interval: The interval within which to fetch events.
+    ///   - updateStatus: Closure invoked periodically with the current status of the backend.
+    /// - Returns: A list of all events ever created.
     func loadEvents(in interval: DateInterval,
                     updateStatus: @escaping (BackendStatus) -> Void) async throws -> [KeystoneEvent]
 }
@@ -41,6 +58,7 @@ public extension KeystoneBackend {
     }
 }
 
+/// A backend that persists events in a `CloudKit` container.
 public final class CloudKitBackend: KeystoneBackend {
     /// The configuration object.
     let config: KeystoneConfig
@@ -63,7 +81,13 @@ public final class CloudKitBackend: KeystoneBackend {
     /// The unique iCloud record ID for the user.
     let iCloudRecordID: String
     
-    /// Default initializer.
+    /// Create a CloudKit backend.
+    ///
+    /// - Parameters:
+    ///   - config: The configuration object.
+    ///   - containerIdentifier: The identifier of the CloudKit container used for persistence.
+    ///   - tableName: The name of the table to use in the given CloudKit container.
+    ///   - userIdColumnName: The name of the column that represents the user identifier in the given table.
     public init(config: KeystoneConfig,
                 containerIdentifier: String,
                 tableName: String,
@@ -467,16 +491,17 @@ extension CloudKitBackend {
 
 // MARK: MockBackend
 
+/// A backend that discards all events passed to it.
 public final class MockBackend {
-    /// Default initializer.
+    /// Create a mock backend.
     public init() { }
 }
 
 extension MockBackend: KeystoneBackend {
-    /// Persist an event ot the backend.
+    /// Discards the event.
     public func persist(event: KeystoneEvent) async throws { }
     
-    /// Load events starting from a date.
+    /// Returns an empty list.
     public func loadEvents(in interval: DateInterval,
                            updateStatus: @escaping (BackendStatus) -> Void) async throws -> [KeystoneEvent] {
         return []

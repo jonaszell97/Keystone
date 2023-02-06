@@ -1,6 +1,7 @@
 
 import Foundation
 
+/// The status of a ``KeystoneAnalyzer``.
 public enum AnalyzerStatus {
     /// The analyzer is ready.
     case ready
@@ -8,10 +9,10 @@ public enum AnalyzerStatus {
     /// The analyzer is initalizing its state.
     case initializingState
     
-    /// Events are being persisted.
+    /// The analyzer is persisting events.
     case persistingEvents(progress: Double)
     
-    /// The state is being persisted.
+    /// The analyzer is persisting its state.
     case persistingState(progress: Double)
     
     /// The analyzer is fetching events.
@@ -32,6 +33,47 @@ fileprivate struct AggregatorProcessingInfo {
     let interval: DateInterval?
 }
 
+/// Responsible for event processing, persistence, and aggregator state management.
+///
+/// A `KeystoneAnalyzer` serves as the interface to the ``EventAggregator`` instances used to process your events.
+/// You can create a `KeystoneAnalyzer` with the ``KeystoneAnalyzerBuilder`` helper struct. It allows you to
+/// configure the event categories, columns, and aggregators relevant to your App.
+///
+/// ```swift
+/// var builder = KeystoneAnalyzerBuilder(config: config, backend: backend, delegate: delegate)
+/// builder.registerCategory(/* ... */)
+/// builder.registerAllEventAggregator(/* ... */)
+///
+/// let analyzer = try await builder.build()
+/// ```
+///
+/// `KeystoneAnalyzer` provides methods for finding aggregators within a given time interval. It automatically creates the necessary
+/// aggregator instances and feeds them all events in the given time interval.
+///
+/// ```swift
+/// // Get the number of total sessions throughout the lifetime of the App
+/// let allTimeSessionCount = try await analyzer.findAggregator(
+///     withId: "Sessions",
+///     in: KeystoneAnalyzer.allEncompassingDateInterval)
+///
+/// // Get the number of sessions today
+/// let todaySessionCount = try await analyzer.findAggregator(
+///     withId: "Sessions",
+///     in: KeystoneAnalyzer.dayInterval(containing: .now))
+///
+/// // Fetch all aggregators installed for the `sessionStartEvent`
+/// // event category with the data from this month
+/// let thisMonthSessionAggregators = try await analyzer.findAggregators(
+///     category: "sessionStartEvent",
+///     in: KeystoneAnalyzer.currentEventInterval)
+/// ```
+///
+/// You can also fetch a list of events that were submitted within a given time interval.
+///
+/// ```swift
+/// let todaysEvents = try await analyzer.getProcessedEvents(
+///     in: KeystoneAnalyzer.dayInterval(containing: .now))
+/// ```
 @MainActor public final class KeystoneAnalyzer {
     /// The current status.
     var status: AnalyzerStatus
@@ -69,7 +111,7 @@ fileprivate struct AggregatorProcessingInfo {
         return true
     }
     
-    /// Initialize the analytics state.
+    /// Create an analyzer.
     internal init(config: KeystoneConfig, delegate: KeystoneDelegate, backend: KeystoneBackend,
                   eventCategories: [EventCategory], allEventAggregators: [AggregatorMeta]) async throws {
         self.status = .initializingState
@@ -146,7 +188,7 @@ fileprivate struct AggregatorProcessingInfo {
         await self.delegate.statusChanged(to: status)
     }
     
-    /// Reset the analytics state.
+    /// Reset the state of the analyzer.
     public func reset() async throws {
         for (_, state) in state.historicalStates {
             await self.removeState(state)
@@ -170,6 +212,11 @@ fileprivate struct AggregatorProcessingInfo {
 
 extension KeystoneAnalyzer {
     /// Find an aggregator with the given ID in the selected time interval.
+    ///
+    /// - Parameters:
+    ///   - id: The ID of the aggregator to search for.
+    ///   - interval: The interval within which to aggregate events for this aggregator.
+    /// - Returns: An aggregator with the given ID that has processed all events in the given interval, or `nil` if none was found.
     public func findAggregator(withId id: String, in interval: DateInterval) async throws -> EventAggregator? {
         guard Self.isNormalized(interval) else {
             return try await self.findAggregator(withId: id, inNonNormalInterval: interval)
@@ -192,7 +239,12 @@ extension KeystoneAnalyzer {
         return state.aggregators.first { $0.key == id }?.value
     }
     
-    /// Find all aggregators belonging to a column in the given interval.
+    /// Find all aggregators belonging to a category in the given interval.
+    ///
+    /// - Parameters:
+    ///   - category: The name of the category.
+    ///   - interval: The interval within which to aggregate events for this aggregator.
+    /// - Returns: All aggregators belonging to the category that have processed all events in the given interval.
     public func findAggregators(for category: String, in interval: DateInterval) async throws -> [String: EventAggregator] {
         guard Self.isNormalized(interval) else {
             return try await self.findAggregators(for: category, inNonNormalInterval: interval)
@@ -215,7 +267,7 @@ extension KeystoneAnalyzer {
         return state.aggregators.filter { self.aggregatorInfo[$0.key]?.columns.contains { $0?.categoryName == category } ?? false }
     }
     
-    /// Load new events.
+    /// Load and process new events.
     public func loadNewEvents() async throws {
         try await self.loadAndProcessNewEvents()
     }
@@ -226,21 +278,21 @@ extension KeystoneAnalyzer {
 public extension KeystoneAnalyzer {
     // MARK: Yearly
     
-    /// Get the current year interval.
+    /// Get the yearly interval containing the given date.
+    nonisolated static func yearInterval(containing date: Date) -> DateInterval {
+        .init(start: date.startOfYear, end: date.endOfYear)
+    }
+    
+    /// Get the yearly interval before the given one.
     nonisolated static func yearInterval(before: DateInterval) -> DateInterval {
         let previous = before.start.addingTimeInterval(-24*60*60)
         return .init(start: previous.startOfYear, end: previous.endOfYear)
     }
     
-    /// Get the current year interval.
+    /// Get the yearly interval after the given one.
     nonisolated static func yearInterval(after: DateInterval) -> DateInterval {
         let next = after.end.addingTimeInterval(24*60*60)
         return .init(start: next.startOfYear, end: next.endOfYear)
-    }
-    
-    /// Get the current year interval.
-    nonisolated static func yearInterval(containing date: Date) -> DateInterval {
-        .init(start: date.startOfYear, end: date.endOfYear)
     }
     
     // MARK: Monthly (normalized)
@@ -250,73 +302,73 @@ public extension KeystoneAnalyzer {
         DateInterval(start: Date(timeIntervalSinceReferenceDate: 0), duration: 300 * 365 * 24 * 60 * 60)
     }()
     
-    /// Get the current date interval.
+    /// Get the monthly interval containing the current date.
     nonisolated static var currentEventInterval: DateInterval {
         let now = KeystoneAnalyzer.now
         return .init(start: now.startOfMonth, end: now.endOfMonth)
     }
     
-    /// Get the current date interval.
+    /// Get the monthly interval before the given one.
     nonisolated static func interval(before: DateInterval) -> DateInterval {
         let previous = before.start.addingTimeInterval(-24*60*60)
         return .init(start: previous.startOfMonth, end: previous.endOfMonth)
     }
     
-    /// Get the current date interval.
+    /// Get the monthly interval after the given one.
     nonisolated static func interval(after: DateInterval) -> DateInterval {
         let next = after.end.addingTimeInterval(24*60*60)
         return .init(start: next.startOfMonth, end: next.endOfMonth)
     }
     
-    /// Get the current date interval.
+    /// Get the monthly interval containing the given date.
     nonisolated static func interval(containing date: Date) -> DateInterval {
         .init(start: date.startOfMonth, end: date.endOfMonth)
     }
     
-    /// Get the current date interval.
+    /// Whether a given interval is normalized, i.e. monthly.
     nonisolated static func isNormalized(_ interval: DateInterval) -> Bool {
         interval == Self.interval(containing: interval.start) || interval == allEncompassingDateInterval
     }
     
     // MARK: Weekly
     
-    /// Get the current date interval.
+    /// Get the weekly interval containing the given date.
+    nonisolated static func weekInterval(containing date: Date, weekStartsOnMonday: Bool) -> DateInterval {
+        .init(start: date.startOfWeek(weekStartsOn: weekStartsOnMonday ? .monday : .sunday),
+              end: date.endOfWeek(weekStartsOn: weekStartsOnMonday ? .monday : .sunday))
+    }
+    
+    /// Get the weekly interval before the given one.
     nonisolated static func weekInterval(before: DateInterval, weekStartsOnMonday: Bool) -> DateInterval {
         let previous = before.start.addingTimeInterval(-24*60*60)
         return .init(start: previous.startOfWeek(weekStartsOn: weekStartsOnMonday ? .monday : .sunday),
                      end: previous.endOfWeek(weekStartsOn: weekStartsOnMonday ? .monday : .sunday))
     }
     
-    /// Get the current date interval.
+    /// Get the weekly interval after the given one.
     nonisolated static func weekInterval(after: DateInterval, weekStartsOnMonday: Bool) -> DateInterval {
         let next = after.end.addingTimeInterval(24*60*60)
         return .init(start: next.startOfWeek(weekStartsOn: weekStartsOnMonday ? .monday : .sunday),
                      end: next.endOfWeek(weekStartsOn: weekStartsOnMonday ? .monday : .sunday))
     }
     
-    /// Get the current date interval.
-    nonisolated static func weekInterval(containing date: Date, weekStartsOnMonday: Bool) -> DateInterval {
-        .init(start: date.startOfWeek(weekStartsOn: weekStartsOnMonday ? .monday : .sunday),
-              end: date.endOfWeek(weekStartsOn: weekStartsOnMonday ? .monday : .sunday))
-    }
-    
     // MARK: Daily
     
-    /// Get the current day interval.
+    /// Get the daily interval containing the given date.
+    nonisolated static func dayInterval(containing date: Date) -> DateInterval {
+        .init(start: date.startOfDay, end: date.endOfDay)
+    }
+    
+    /// Get the daily interval before the given one.
     nonisolated static func dayInterval(before: DateInterval) -> DateInterval {
         let previous = before.start.addingTimeInterval(-24*60*60)
         return .init(start: previous.startOfDay, end: previous.endOfDay)
     }
     
-    /// Get the current day interval.
+    /// Get the daily interval after the given one.
     nonisolated static func dayInterval(after: DateInterval) -> DateInterval {
         let next = after.end.addingTimeInterval(24*60*60)
         return .init(start: next.startOfDay, end: next.endOfDay)
-    }
-    
-    /// Get the current day interval.
-    nonisolated static func dayInterval(containing date: Date) -> DateInterval {
-        .init(start: date.startOfDay, end: date.endOfDay)
     }
 }
 
@@ -602,14 +654,14 @@ extension KeystoneAnalyzer {
         state.knownAggregators.insert(contentsOf: state.aggregators.map { $0.key })
         
         // Persist
-        let key = KeystoneAggregatorState.key(for: state.interval)
+        let key = _KeystoneAggregatorState.key(for: state.interval)
         await delegate.persist(try state.codableState(), withKey: key)
     }
     
     /// Persist a time interval state.
     func removeState(_ state: IntervalAggregatorState) async {
-        let key = KeystoneAggregatorState.key(for: state.interval)
-        await delegate.persist(Optional<KeystoneAggregatorState>.none, withKey: key)
+        let key = _KeystoneAggregatorState.key(for: state.interval)
+        await delegate.persist(Optional<_KeystoneAggregatorState>.none, withKey: key)
     }
     
     /// Check if the current state needs to be updated.
@@ -639,7 +691,7 @@ extension KeystoneAnalyzer {
                                                       interval: interval,
                                                       allEventsAggregators: allEventAggregators)
         
-        if let state = await delegate.load(KeystoneAggregatorState.self, withKey: KeystoneAggregatorState.key(for: interval)) {
+        if let state = await delegate.load(_KeystoneAggregatorState.self, withKey: _KeystoneAggregatorState.key(for: interval)) {
             return try IntervalAggregatorState(from: state, aggregators: aggregators)
         }
         
@@ -804,7 +856,10 @@ extension KeystoneAnalyzer {
         await delegate.persist(currentIntervalEvents, withKey: Self.eventsKey(for: currentInterval))
     }
     
-    /// Get the events in the given interval from cache.
+    /// Fetch the events in the given interval from the delegate.
+    ///
+    /// - Parameter interval: The interval within which to fetch events.
+    /// - Returns: The events fetched from the delegate, or `nil` if they were not found.
     public func getProcessedEvents(in interval: DateInterval) async -> [KeystoneEvent]? {
         if Self.isNormalized(interval) && interval != Self.allEncompassingDateInterval {
             return await delegate.load([KeystoneEvent].self, withKey: Self.eventsKey(for: interval))
@@ -846,6 +901,15 @@ extension KeystoneAnalyzer {
 
 // MARK: Builder
 
+/// Configure and initialize a ``KeystoneAnalyzer``.
+///
+/// ```swift
+/// var builder = KeystoneAnalyzerBuilder(config: config, backend: backend, delegate: delegate)
+/// builder.registerCategory(/* ... */)
+/// builder.registerAllEventAggregator(/* ... */)
+///
+/// let analyzer = try await builder.build()
+/// ```
 public struct KeystoneAnalyzerBuilder {
     /// The configuration object.
     let config: KeystoneConfig
@@ -862,7 +926,12 @@ public struct KeystoneAnalyzerBuilder {
     /// The known event categories.
     var eventCategories: [EventCategory]
     
-    /// Memberwise initializer.
+    /// Create an analyzer builder.
+    ///
+    /// - Parameters:
+    ///   - config: The configuration object.
+    ///   - backend: The backend used to fetch events.
+    ///   - delegate: The delegate used for state persistence.
     public init(config: KeystoneConfig,
                 backend: KeystoneBackend,
                 delegate: KeystoneDelegate) {
@@ -875,7 +944,11 @@ public struct KeystoneAnalyzerBuilder {
 }
 
 public extension KeystoneAnalyzerBuilder {
-    /// Register an event category.
+    /// Register an event category with this analyzer.
+    ///
+    /// - Parameters:
+    ///   - name: The name of the category.
+    ///   - modify: Closure invoked with an ``EventCategoryBuilder`` that can be used to configure the category.
     mutating func registerCategory(name: String, modify: (inout EventCategoryBuilder) -> Void) {
         var builder = EventCategoryBuilder(name: name)
         modify(&builder)
@@ -884,11 +957,18 @@ public extension KeystoneAnalyzerBuilder {
     }
     
     /// Register an aggregator for all events.
+    ///
+    /// - Parameters:
+    ///   - id: The ID of the aggregator.
+    ///   - interval: The interval within which the aggregator operates.
+    ///   - instantiateAggregator: Closure to instantiate the aggregator.
     mutating func registerAllEventAggregator(id: String, interval: DateInterval? = nil, instantiateAggregator: @escaping () -> any EventAggregator) {
         self.allEventAggregators.append(.init(id: id, interval: interval, instantiate: instantiateAggregator))
     }
     
-    /// Build the analyzer.
+    /// Finalize and create the analyzer.
+    ///
+    /// - Returns: The `KeystoneAnalyzer` as configured by this builder.
     func build() async throws -> KeystoneAnalyzer {
         try await KeystoneAnalyzer(config: config, delegate: delegate, backend: backend,
                                    eventCategories: eventCategories,

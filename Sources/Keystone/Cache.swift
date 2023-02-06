@@ -1,5 +1,4 @@
 
-//import AppUtilities
 import Foundation
 
 @MainActor internal final class KeystoneAnalyzerState {
@@ -75,8 +74,8 @@ import Foundation
 
 extension IntervalAggregatorState {
     /// The opaque encodable state object.
-    func codableState() throws -> KeystoneAggregatorState {
-        KeystoneAggregatorState(interval: interval,
+    func codableState() throws -> _KeystoneAggregatorState {
+        _KeystoneAggregatorState(interval: interval,
                                 processedEventInterval: self.processedEventInterval,
                                 eventCount: self.eventCount,
                                 knownAggregators: Set(aggregators.keys),
@@ -84,7 +83,7 @@ extension IntervalAggregatorState {
     }
     
     /// Initialize from a codable state.
-    convenience init(from codableState: KeystoneAggregatorState, aggregators: [String: EventAggregator]) throws {
+    convenience init(from codableState: _KeystoneAggregatorState, aggregators: [String: EventAggregator]) throws {
         self.init(interval: codableState.interval,
                   processedEventInterval: codableState.processedEventInterval,
                   knownAggregators: codableState.knownAggregators,
@@ -111,7 +110,8 @@ internal struct AggregatorState {
     let data: Data?
 }
 
-public struct KeystoneAggregatorState {
+/// Represents the internal state of an aggregator that is persisted across App launches.
+public struct _KeystoneAggregatorState {
     /// The date interval this state covers.
     let interval: DateInterval
     
@@ -128,12 +128,12 @@ public struct KeystoneAggregatorState {
     let aggregators: [AggregatorState]
     
     /// The unique key for this state.
-    public var key: String {
+    var key: String {
         Self.key(for: interval)
     }
     
     /// The unique key for this state.
-    public static func key(for interval: DateInterval) -> String {
+    static func key(for interval: DateInterval) -> String {
         "state-\(self.formatDate(interval.start))-\(self.formatDate(interval.end))"
     }
     
@@ -157,7 +157,7 @@ public struct KeystoneAggregatorState {
     }
 }
 
-extension KeystoneAggregatorState: Codable {
+extension _KeystoneAggregatorState: Codable {
     enum CodingKeys: String, CodingKey {
         case interval, processedEventInterval, eventCount, knownAggregators, aggregators
     }

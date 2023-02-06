@@ -1,6 +1,10 @@
 
 import Foundation
 
+/// The result of processing an event by the ``EventAggregator/addEvent(_:column:)`` function.
+///
+/// This value is only relevant for chaining aggregators, where it determines the event data that is forwarded
+/// to the next aggregator in the chain, if any.
 public enum EventProcessingResult {
     /// The event should be kept as-is.
     case keep
@@ -12,14 +16,36 @@ public enum EventProcessingResult {
     case replace(with: KeystoneEvent)
 }
 
+/// Aggregators analyze and process ``KeystoneEvent`` instances.
+///
+/// Aggregators are the way in which you analyze and process events in `Keystone`. An aggregator can be registered on all events,
+/// an entire event category, or a single column of an event category.
+///
+/// The ``KeystoneAnalyzer`` calls the aggregators ``EventAggregator/addEvent(_:column:)`` method for all events that
+/// match the scope in which the aggregator was registered.
+///
+/// Additionally, aggregators should support encoding and decoding their state to avoid having to reprocess all events whenever the App relaunches.
+/// Aggregator state persistence is handled by the ``KeystoneAnalyzer``, which persists its state using a ``KeystoneDelegate``.
+///
+/// Aggregators can be chained, which allows an aggregator to receive events that were filtered or modified by a different aggregator earlier in the chain.
+/// As a result, if you want to query an aggregator's state, you should make sure that you are accessing the ``EventAggregator/final-7ge2n`` instance,
+/// which represents the last aggregator in a chain.
 public protocol EventAggregator: AnyObject, CustomDebugStringConvertible {
     /// Add a new event to this aggregator.
+    /// - Parameters:
+    ///   - event: The event that was added.
+    ///   - column: The column this aggregator was installed on, or `nil` if this aggregator does not belong to a column.
+    /// - Returns: The result of processing the event.
     @MainActor func addEvent(_ event: KeystoneEvent, column: EventColumn?) -> EventProcessingResult
     
     /// Encode this aggregator's state.
+    ///
+    /// - Returns: The encoded aggregator state, or `nil` if this aggregator is stateless.
     func encode() throws -> Data?
     
     /// Decode this aggregator's state from a given Data value.
+    ///
+    /// - Parameter data: The encoded aggregator state.
     func decode(from data: Data) throws
     
     /// Reset this aggregator's state.
@@ -49,6 +75,9 @@ extension EventAggregator {
     }
     
     /// Chain another aggregator to operate on the results of this one.
+    ///
+    /// - Parameter builder: Builds the aggregator that the event processing result of `self` is forwarded to.
+    /// - Returns: A `ChainingAggregator`that forwards events from `self` to the output of `builder`.
     public func then<Aggregator: EventAggregator>(_ builder: () -> Aggregator) -> some EventAggregator {
         ChainingAggregator(input: self, output: builder())
     }
@@ -56,6 +85,13 @@ extension EventAggregator {
 
 // MARK: ChainingAggregator
 
+/// An aggregator that forwards the event processing result of one aggregator to another aggregator.
+///
+/// You can easily create aggregator chains using the ``EventAggregator/then(_:)`` method.
+/// ```swift
+/// // An aggregator that filters events by a predicate and then counts them
+/// FilteringAggregator(predicate: somePredicate).then { CountingAggregator() }
+/// ```
 public final class ChainingAggregator {
     /// The aggregator the event is first passed to.
     public var input: any EventAggregator
@@ -63,7 +99,11 @@ public final class ChainingAggregator {
     /// The aggregator the filtered events are then passed to.
     public var output: any EventAggregator
     
-    /// Memberwise initializer.
+    /// Create a chaining aggregator.
+    ///
+    /// - Parameters:
+    ///   - input: The aggregator that processes the event.
+    ///   - output: The aggregator to which the result of the first aggregator is forwarded to.
     public init(input: any EventAggregator, output: any EventAggregator) {
         self.input = input
         self.output = output
@@ -108,6 +148,26 @@ extension ChainingAggregator {
 
 // MARK: NumericStatsAggregator
 
+/// Collects statistics (count, sum, average, and variance) about a numeric event column.
+///
+/// The following example assumes that a `NumericStatsAggregator` is installed on the `amount` column of an
+/// exemplary `moneySpent` event.
+///
+/// ```swift
+///  client.submitEvent(category: "moneySpent", data: ["amount": .number(10)])
+///  client.submitEvent(category: "moneySpent", data: ["amount": .number(15)])
+///  client.submitEvent(category: "moneySpent", data: ["amount": .number(5)])
+///  client.submitEvent(category: "moneySpent", data: ["amount": .number(50)])
+///  client.submitEvent(category: "moneySpent", data: ["amount": .number(15)])
+/// ```
+/// The data collected by the `NumericStatsAggregator` can then be accessed as follows:
+///
+/// ```swift
+/// let amountSpentStats = analyzer.findAggregator(/* ... */)
+/// print(amountSpentStats.valueCount)      // prints "5"
+/// print(amountSpentStats.sum)             // prints "95.0"
+/// print(amountSpentStats.runningAverage)  // prints "19.0"
+/// ```
 open class NumericStatsAggregator {
     /// The number of encountered values.
     public var valueCount: Int
@@ -121,7 +181,13 @@ open class NumericStatsAggregator {
     /// The running variance.
     public var runningVariance: Double
     
-    /// Memberwise initializer.
+    /// Create a numeric stats aggregator with initial values.
+    ///
+    /// - Parameters:
+    ///   - valueCount: The initial value count.
+    ///   - sum: The initial sum.
+    ///   - runningAverage: The initial mean.
+    ///   - runningVariance: The initial variance.
     public init(valueCount: Int = 0,
                 sum: Double = 0,
                 runningAverage: Double = 0,
@@ -199,11 +265,30 @@ public extension NumericStatsAggregator {
 
 // MARK: CountingAggregator
 
+/// Counts the number of events it encounters.
+///
+/// Example usage:
+/// ```swift
+/// builder.registerCategory("sessionStart") { category in
+///     category.registerAggregator("Sessions") { CountingAggregator() }
+/// }
+/// ```
+///
+/// ```swift
+/// client.submitEvent(category: "sessionStart")
+/// client.submitEvent(category: "sessionStart")
+/// client.submitEvent(category: "sessionStart")
+///
+/// // later...
+/// print(sessionsAggregator.valueCount) // prints "3"
+/// ```
 open class CountingAggregator {
-    /// The number of encountered values.
+    /// The number of encountered events.
     public var valueCount: Int
     
-    /// Memberwise initializer.
+    /// Create a counting aggregator with an  initial value count.
+    ///
+    /// - Parameter valueCount: The initial value count.
     public init(valueCount: Int = 0) {
         self.valueCount = valueCount
     }
@@ -237,11 +322,14 @@ extension CountingAggregator {
 
 // MARK: LatestValueAggregator
 
+/// Keeps only the latest event for each user.
 open class LatestEventAggregator {
     /// The latest event by each user.
     var latestEvents: [String: KeystoneEvent]
     
-    /// Memberwise initializer.
+    /// Create a latest value aggregator.
+    ///
+    /// - Parameter latestEvents: The initial latest event dictionary.
     public init(latestEvents: [String: KeystoneEvent] = [:]) {
         self.latestEvents = latestEvents
     }
@@ -272,11 +360,14 @@ extension LatestEventAggregator: EventAggregator {
 
 // MARK: FilteringAggregator
 
+/// Filters events by applying some predicate to the column value.
 public final class FilteringAggregator {
     /// The filter predicate.
     let filter: (KeystoneEventData) -> Bool
     
-    /// Memberwise initializer.
+    /// Create a filtering aggregator.
+    ///
+    /// - Parameter filter: The filter predicate.
     public init(filter: @escaping (KeystoneEventData) -> Bool) {
         self.filter = filter
     }
@@ -317,11 +408,14 @@ extension FilteringAggregator: EventAggregator {
 
 // MARK: MetaFilteringAggregator
 
+/// Filters events by applying some predicate to the event itself.
 public final class MetaFilteringAggregator {
     /// The filter predicate.
     let filter: (KeystoneEvent) -> Bool
     
-    /// Memberwise initializer.
+    /// Create a filtering aggregator.
+    ///
+    /// - Parameter filter: The filter predicate.
     public init(filter: @escaping (KeystoneEvent) -> Bool) {
         self.filter = filter
     }
@@ -356,11 +450,14 @@ extension MetaFilteringAggregator: EventAggregator {
 
 // MARK: MappingAggregator
 
+/// Maps the value of an event column to a different value using a closure parameter.
 public final class MappingAggregator {
     /// The mapping function.
     let map: (KeystoneEventData) -> KeystoneEventData?
     
-    /// Memberwise initializer.
+    /// Create a mapping aggregator.
+    ///
+    /// - Parameter map: The mapping closure.
     public init(map: @escaping (KeystoneEventData) -> Optional<KeystoneEventData>) {
         self.map = map
     }
@@ -407,6 +504,7 @@ extension MappingAggregator {
 
 // MARK: GroupingAggregator
 
+/// Groups events that share the same event data for the column this aggregator is installed on.
 open class GroupingAggregator: EventAggregator {
     /// The grouped values.
     public var groupedValues: [KeystoneEventData: [KeystoneEvent]]
@@ -414,7 +512,9 @@ open class GroupingAggregator: EventAggregator {
     /// The total event count.
     public var totalEventCount: Int { groupedValues.values.reduce(0) { $0 + $1.count } }
     
-    /// Default initializer.
+    /// Create a grouping aggregator.
+    ///
+    /// - Parameter groupedValues: The initial grouped values.
     public init(groupedValues: [KeystoneEventData: [KeystoneEvent]] = [:]) {
         self.groupedValues = groupedValues
     }
@@ -453,6 +553,7 @@ open class GroupingAggregator: EventAggregator {
 
 // MARK: CountingByGroupAggregator
 
+/// Counts events that share the same event data for the column this aggregator is installed on.
 open class CountingByGroupAggregator: EventAggregator {
     /// The grouped values.
     public var groupedValues: [KeystoneEventData: Int]
@@ -460,7 +561,9 @@ open class CountingByGroupAggregator: EventAggregator {
     /// The total event count.
     public var totalEventCount: Int { groupedValues.values.reduce(0) { $0 + $1 } }
     
-    /// Default initializer.
+    /// Create a grouping aggregator.
+    ///
+    /// - Parameter groupedValues: The initial grouped value counts.
     public init(groupedValues: [KeystoneEventData: Int] = [:]) {
         self.groupedValues = groupedValues
     }
@@ -499,6 +602,7 @@ open class CountingByGroupAggregator: EventAggregator {
 
 // MARK: DateAggregator
 
+/// The granularity with which a DateAggregator groups its events.
 public enum DateAggregatorScope: String {
     /// Group values by hour.
     case hour
@@ -534,6 +638,7 @@ internal extension DateAggregatorScope {
     }
 }
 
+/// Groups events that share the same date with a given granularity for the column this aggregator is installed on.
 open class DateAggregator: EventAggregator {
     /// The date components kept for keying.
     public let scope: DateAggregatorScope
@@ -544,7 +649,11 @@ open class DateAggregator: EventAggregator {
     /// The total event count.
     public var totalEventCount: Int { groupedValues.values.reduce(0) { $0 + $1.count } }
     
-    /// Default initializer.
+    /// Create a grouping aggregator.
+    ///
+    /// - Parameters:
+    ///   - scope: The time granularity within which to group values.
+    ///   - groupedValues: The initial grouped values.
     public init(scope: DateAggregatorScope, groupedValues: [Date: [KeystoneEvent]] = [:]) {
         self.scope = scope
         self.groupedValues = groupedValues
@@ -579,6 +688,7 @@ open class DateAggregator: EventAggregator {
 
 // MARK: CountingByDateAggregator
 
+/// Counts events that share the same date with a given granularity for the column this aggregator is installed on.
 open class CountingByDateAggregator: EventAggregator {
     /// The date components kept for keying.
     public let scope: DateAggregatorScope
@@ -589,7 +699,11 @@ open class CountingByDateAggregator: EventAggregator {
     /// The total event count.
     public var totalEventCount: Int { groupedValues.values.reduce(0) { $0 + $1 } }
     
-    /// Default initializer.
+    /// Create a grouping aggregator.
+    ///
+    /// - Parameters:
+    ///   - scope: The time granularity within which to group values.
+    ///   - groupedValues: The initial grouped values.
     public init(scope: DateAggregatorScope, groupedValues: [Date: Int] = [:]) {
         self.scope = scope
         self.groupedValues = groupedValues
@@ -624,6 +738,7 @@ open class CountingByDateAggregator: EventAggregator {
 
 // MARK: DuplicateEventChecker
 
+/// Verifies that an aggregator does not receive duplicate events.
 public final class DuplicateEventChecker {
     /// The IDs of all events that were encountered so far by this aggregator.
     var encounteredEvents: Set<UUID> = []
@@ -631,7 +746,7 @@ public final class DuplicateEventChecker {
     /// The number of duplicates that were found.
     var encounteredDuplicates: Int = 0
     
-    /// Default initializer.
+    /// Create a duplicate event checker.
     public init() { }
 }
 
@@ -670,6 +785,10 @@ extension DuplicateEventChecker: EventAggregator {
 
 // MARK: Compound aggregators
 
+/// Create an aggregator that counts the events that pass a given predicate.
+///
+/// - Parameter predicate: The predicate to filter values with.
+/// - Returns: An aggregator that counts the events that pass the given `predicate`.
 public func PredicateAggregator(predicate: @escaping (KeystoneEventData) -> Bool) -> some EventAggregator {
     FilteringAggregator(filter: predicate).then { CountingAggregator() }
 }

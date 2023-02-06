@@ -1,6 +1,7 @@
 
 import Foundation
 
+/// Represents the data associated with an event. Events can have multiple columns with different types of data.
 public enum KeystoneEventData {
     /// Numeric data.
     case number(value: Double)
@@ -29,6 +30,9 @@ public extension KeystoneEventData {
     }
     
     /// Try to decode this datum as a value of a given type.
+    ///
+    /// - Parameter type: The type to attempt to decode.
+    /// - Returns: The decoded value, if decoding was successful.
     func decode<T: Decodable>(as type: T.Type) throws -> T {
         guard case .codable(let data) = self else {
             throw DecodingError.valueNotFound(

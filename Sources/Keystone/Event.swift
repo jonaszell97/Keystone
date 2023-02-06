@@ -1,11 +1,18 @@
 
 import Foundation
 
+/// An event can represent anything happening in your App that you want to keep track of.
+///
+/// Events are created and persisted by ``KeystoneClient``. They feature a unique ID, a creation date, a user ID,
+/// an event category, and event-specific data.
+///
+/// Events are passed to instances of ``EventAggregator``in order to process them. ``KeystoneAnalyzer`` provides an
+/// interface to query events and aggregators in specific date intervals.
 public struct KeystoneEvent {
     /// The ID of the event.
     public let id: UUID
     
-    /// The analytics ID of the device that generated the event.
+    /// The ID of the user that generated the event.
     public let userId: String
     
     /// The event category.
@@ -17,7 +24,14 @@ public struct KeystoneEvent {
     /// The data associated with this event.
     public let data: [String: KeystoneEventData]
     
-    /// Memberwise initializer.
+    /// Create an event.
+    ///
+    /// - Parameters:
+    ///   - id: The unique ID of the event.
+    ///   - userId: The ID of the user that generated the event.
+    ///   - category: The event category.
+    ///   - date: The creation date of this event.
+    ///   - data: The specific data associated with this event.
     public init(id: UUID,
                 userId: String,
                 category: String,
@@ -32,7 +46,15 @@ public struct KeystoneEvent {
 }
 
 public extension KeystoneEvent {
-    /// Create a copy of this event with a new date.
+    /// Create a copy of this event with some of its data replaced.
+    ///
+    /// - Parameters:
+    ///   - id: The unique ID of the event.
+    ///   - userId: The ID of the user that generated the event.
+    ///   - category: The event category.
+    ///   - date: The creation date of this event.
+    ///   - data: The specific data associated with this event.
+    /// - Returns: A new event with either the values of `self` or of the non-`nil` parameters.
     func copy(id: UUID? = nil, userId: String? = nil, category: String? = nil, date: Date? = nil,
               data: [String: KeystoneEventData]? = nil) -> KeystoneEvent {
         .init(id: id ?? self.id, userId: userId ?? self.userId,

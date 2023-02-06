@@ -2,29 +2,27 @@
 import Foundation
 import os
 
+/// Configuration for ``KeystoneAnalyzer``, ``KeystoneClient`` and ``KeystoneBackend``.
 public struct KeystoneConfig {
-    /// The analytics identifier for the current user.
+    /// The unique identifier for the current user. New events are submitted with this identifier by default.
     public let userIdentifier: String
     
-    /// The amount of time that all analytics events should be kept in cache.
-    public let keepAllEventsForTimeInterval: DateComponents
-    
-    /// Whether or not aggregator state should be persisted.
-    public let persistAggregatorState: Bool
-    
-    /// Function for logging events.
+    /// Custom logging function.
     public var log: Optional<(OSLogType, String) -> Void> = nil
     
-    /// Memberwise initializer.
+    /// Create a configuration instance.
+    ///
+    /// - Parameters:
+    ///   - userIdentifier: The unique identifier for the current user.
+    ///   - log: Custom logging function. Set this parameter if you want to be informed of internal `Keystone` messages.
     public init(userIdentifier: String,
-                keepAllEventsForTimeInterval: DateComponents = .init(month: 3),
-                persistAggregatorState: Bool = true) {
+                log: Optional<(OSLogType, String) -> Void> = nil) {
         self.userIdentifier = userIdentifier
-        self.keepAllEventsForTimeInterval = keepAllEventsForTimeInterval
-        self.persistAggregatorState = persistAggregatorState
+        self.log = log
     }
 }
 
+/// Information about an aggregator that can be instantiated in multiple time intervals.
 public struct AggregatorMeta {
     /// The aggregator ID.
     let id: String
@@ -35,7 +33,7 @@ public struct AggregatorMeta {
     /// Function to instantiate this aggregator.
     let instantiate: () -> any EventAggregator
     
-    /// Public initializer.
+    /// Create a new aggregator info structure.
     public init(id: String, interval: DateInterval? = nil, instantiate: @escaping () -> any EventAggregator) {
         self.id = id
         self.interval = interval
@@ -43,6 +41,9 @@ public struct AggregatorMeta {
     }
 }
 
+/// Create event categories with a ``KeystoneAnalyzer`` with this builder type.
+///
+/// You should not create instances of this type directly. Instead, use ``KeystoneAnalyzerBuilder/registerCategory(name:modify:)``.
 public struct EventCategoryBuilder {
     /// The name of this category.
     public let name: String
@@ -63,6 +64,10 @@ public struct EventCategoryBuilder {
 
 public extension EventCategoryBuilder {
     /// Register an event column.
+    ///
+    /// - Parameters:
+    ///   - columnName: The name of the column.
+    ///   - modify: Callback invoked with an ``EventColumnBuilder`` that can be used to configure the column.
     mutating func registerColumn(name columnName: String, modify: (inout EventColumnBuilder) -> Void) {
         guard columnName != "id" else {
             fatalError("column name id is reserved")
@@ -76,6 +81,10 @@ public extension EventCategoryBuilder {
     }
     
     /// Register an event column.
+    ///
+    /// - Parameters:
+    ///   - columnName: The name of the column.
+    ///   - aggregators: The aggregators installed on this column.
     mutating func registerColumn(name columnName: String, aggregators: [String: () -> any EventAggregator] = [:]) {
         guard columnName != "id" else {
             fatalError("column name id is reserved")
@@ -89,11 +98,18 @@ public extension EventCategoryBuilder {
     }
     
     /// Register an aggregator for the entire category.
+    ///
+    /// - Parameters:
+    ///   - id: The ID of the aggregator.
+    ///   - interval: The interval within which this aggregator is valid.
+    ///   - instantiateAggregator: Closure to create an instance of this aggregator.
     mutating func registerAggregator(id: String, interval: DateInterval? = nil, instantiateAggregator: @escaping () -> any EventAggregator) {
         self.aggregators.append(.init(id: id, interval: interval, instantiate: instantiateAggregator))
     }
     
-    /// Build the category.
+    /// Finalize and create the category.
+    ///
+    /// - Returns: The event category instance as configured by this builder.
     func build() -> EventCategory {
         var columns = columns
         columns.append(.init(name: "id", categoryName: name, aggregators: aggregators))
@@ -102,7 +118,7 @@ public extension EventCategoryBuilder {
     }
 }
 
-
+/// Represents a category of events with its associated columns.
 public struct EventCategory {
     /// The name of this category.
     public let name: String
@@ -117,6 +133,9 @@ public struct EventCategory {
     }
 }
 
+/// Create event columns for a ``EventCategory`` instance with this builder type.
+///
+/// You should not create instances of this type directly. Instead, use ``EventCategoryBuilder/registerColumn(name:modify:)``.
 public struct EventColumnBuilder {
     /// The name of this column.
     internal let name: String
@@ -137,16 +156,24 @@ public struct EventColumnBuilder {
 
 extension EventColumnBuilder {
     /// Register an aggregator for this column.
+    ///
+    /// - Parameters:
+    ///   - id: The ID of the aggregator.
+    ///   - interval: The interval within which this aggregator is valid.
+    ///   - instantiateAggregator: Closure to create an instance of this aggregator.
     public mutating func registerAggregator(id: String, interval: DateInterval? = nil, instantiateAggregator: @escaping () -> any EventAggregator) {
         self.aggregators.append(.init(id: id, interval: interval, instantiate: instantiateAggregator))
     }
     
-    /// Build the column.
+    /// Finalize and create the column.
+    ///
+    /// - Returns: The event column instance as configured by this builder.
     func build() -> EventColumn {
         .init(name: name, categoryName: categoryName, aggregators: aggregators)
     }
 }
 
+/// Represents a single column of an ``EventCategory``.
 public struct EventColumn {
     /// The name of this column.
     public let name: String
