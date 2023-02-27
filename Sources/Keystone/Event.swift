@@ -6,7 +6,7 @@ import Foundation
 /// Events are created and persisted by ``KeystoneClient``. They feature a unique ID, a creation date, a user ID,
 /// an event category, and event-specific data.
 ///
-/// Events are passed to instances of ``EventAggregator``in order to process them. ``KeystoneAnalyzer`` provides an
+/// Events are passed to instances of ``EventAggregator`` in order to process them. ``KeystoneAnalyzer`` provides an
 /// interface to query events and aggregators in specific date intervals.
 public struct KeystoneEvent {
     /// The ID of the event.

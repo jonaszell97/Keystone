@@ -79,7 +79,7 @@ extension EventAggregator {
     /// - Parameter builder: Builds the aggregator that the event processing result of `self` is forwarded to.
     /// - Returns: A `ChainingAggregator`that forwards events from `self` to the output of `builder`.
     public func then<Aggregator: EventAggregator>(_ builder: () -> Aggregator) -> some EventAggregator {
-        ChainingAggregator(input: self, output: builder())
+        ChainingAggregator(source: self, destination: builder())
     }
 }
 
@@ -94,35 +94,35 @@ extension EventAggregator {
 /// ```
 public final class ChainingAggregator {
     /// The aggregator the event is first passed to.
-    public var input: any EventAggregator
+    public var source: any EventAggregator
     
     /// The aggregator the filtered events are then passed to.
-    public var output: any EventAggregator
+    public var destination: any EventAggregator
     
     /// Create a chaining aggregator.
     ///
     /// - Parameters:
     ///   - input: The aggregator that processes the event.
     ///   - output: The aggregator to which the result of the first aggregator is forwarded to.
-    public init(input: any EventAggregator, output: any EventAggregator) {
-        self.input = input
-        self.output = output
+    public init(source: any EventAggregator, destination: any EventAggregator) {
+        self.source = source
+        self.destination = destination
     }
 }
 
 extension ChainingAggregator: EventAggregator {
     /// The next aggregator in the chain.
-    public var next: EventAggregator? { output }
+    public var next: EventAggregator? { destination }
     
     public func addEvent(_ event: KeystoneEvent, column: EventColumn?) -> EventProcessingResult {
-        let result = self.input.addEvent(event, column: column)
+        let result = self.source.addEvent(event, column: column)
         switch result {
         case .discard:
             return .discard
         case .keep:
-            return self.output.addEvent(event, column: column)
+            return self.destination.addEvent(event, column: column)
         case .replace(let replacement):
-            return self.output.addEvent(replacement, column: column)
+            return self.destination.addEvent(replacement, column: column)
         }
     }
     
@@ -131,18 +131,25 @@ extension ChainingAggregator: EventAggregator {
     }
     
     public var debugDescription: String {
-        "ChainingAggregator(\(self.input.debugDescription) -> \(self.output.debugDescription))"
+        "ChainingAggregator(\(self.source.debugDescription) -> \(self.destination.debugDescription))"
     }
 }
 
 extension ChainingAggregator {
     public func encode() throws -> Data? {
-        nil
+        try JSONEncoder().encode([try source.encode(), try destination.encode()])
     }
     
     /// Decode this aggregator's state from a given Data value.
     public func decode(from data: Data) throws {
+        let dataArray = try JSONDecoder().decode([Data?].self, from: data)
+        if dataArray.count > 0, let sourceData = dataArray[0] {
+            try self.source.decode(from: sourceData)
+        }
         
+        if dataArray.count > 1, let destinationData = dataArray[1] {
+            try self.destination.decode(from: destinationData)
+        }
     }
 }
 
@@ -598,6 +605,72 @@ open class CountingByGroupAggregator: EventAggregator {
     }
     
     public var valueCount: Int { self.groupedValues.values.reduce(0) { $0 + $1 } }
+}
+
+// MARK: ChainingByGroupAggregator
+
+/// Groups events by a given value and forwards them to a unique aggregator that only receives events with that specific value.
+public class ChainingByGroupAggregator: EventAggregator {
+    /// The name of the column that contains the value this aggregator should group by.
+    let groupColumnName: String?
+    
+    /// The grouped aggregators.
+    public private(set) var groupedAggregators: [KeystoneEventData: any EventAggregator]
+    
+    /// Function to instantiate a new destination aggregator.
+    let instantiateAggregator: () -> any EventAggregator
+    
+    /// Create a chaining aggregator.
+    ///
+    /// - Parameters:
+    ///   - groupColumnName: The name of the column that contains the value this aggregator should group by.
+    ///   - instantiateAggregator: Function to instantiate a new destination aggregator.
+    public init(groupColumnName: String? = nil, instantiateAggregator: @escaping () -> any EventAggregator) {
+        self.groupedAggregators = [:]
+        self.groupColumnName = groupColumnName
+        self.instantiateAggregator = instantiateAggregator
+    }
+    
+    public func reset() {
+        groupedAggregators = [:]
+    }
+    
+    public func addEvent(_ event: KeystoneEvent, column: EventColumn?) -> EventProcessingResult {
+        guard let columnName = self.groupColumnName ?? column?.name else {
+            return .discard
+        }
+        guard let datum = event.data[columnName] else {
+            return .keep
+        }
+        
+        self.groupedAggregators.modify(key: datum, defaultValue: instantiateAggregator()) { _ = $0.addEvent(event, column: column) }
+        return .keep
+    }
+    
+    public var debugDescription: String {
+        "ChainingByGroupAggregator()"
+    }
+    
+    private struct CodableState: Codable {
+        let eventData: KeystoneEventData
+        let aggregatorState: Data?
+    }
+    
+    public func encode() throws -> Data? {
+        try JSONEncoder().encode(try self.groupedAggregators.map { CodableState(eventData: $0.key, aggregatorState: try $0.value.encode()) })
+    }
+    
+    public func decode(from data: Data) throws {
+        let states = try JSONDecoder().decode([CodableState].self, from: data)
+        for state in states {
+            let aggregator = instantiateAggregator()
+            if let data = state.aggregatorState {
+                try aggregator.decode(from: data)
+            }
+            
+            self.groupedAggregators[state.eventData] = aggregator
+        }
+    }
 }
 
 // MARK: DateAggregator

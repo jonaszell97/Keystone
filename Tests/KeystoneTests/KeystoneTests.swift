@@ -407,35 +407,146 @@ import XCTest
         let analyzer = try! await builder.build()
         
         // Normal interval
-        let currentEventCount = await analyzer.getProcessedEvents(in: KeystoneAnalyzer.currentEventInterval)?.count
+        let currentEventCount = await analyzer.getProcessedEvents(in: KeystoneAnalyzer.currentEventInterval)?.events.count
         XCTAssertEqual(500, currentEventCount)
         
-        let previousEventCount = await analyzer.getProcessedEvents(in: KeystoneAnalyzer.interval(before: KeystoneAnalyzer.currentEventInterval))?.count
+        let previousEventCount = await analyzer.getProcessedEvents(in: KeystoneAnalyzer.interval(before: KeystoneAnalyzer.currentEventInterval))?.events.count
         XCTAssertEqual(500, previousEventCount)
         
         let previous2EventCount = await analyzer.getProcessedEvents(in:
-            KeystoneAnalyzer.interval(before: KeystoneAnalyzer.interval(before: KeystoneAnalyzer.currentEventInterval)))?.count
+                                                                        KeystoneAnalyzer.interval(before: KeystoneAnalyzer.interval(before: KeystoneAnalyzer.currentEventInterval)))?.events.count
         XCTAssertNil(previous2EventCount)
         
         // Weekly interval
         let currentWeek = KeystoneAnalyzer.weekInterval(containing: KeystoneAnalyzer.now, weekStartsOnMonday: true)
-        let currentWeekEventCount = await analyzer.getProcessedEvents(in: currentWeek)!.count
+        let currentWeekEventCount = await analyzer.getProcessedEvents(in: currentWeek)!.events.count
         XCTAssertLessThan(abs((2.0 / 14.0) * 1_000 - Double(currentWeekEventCount)), 1)
         
         let lastWeek = KeystoneAnalyzer.weekInterval(before: currentWeek, weekStartsOnMonday: true)
-        let lastWeekEventCount = await analyzer.getProcessedEvents(in: lastWeek)!.count
+        let lastWeekEventCount = await analyzer.getProcessedEvents(in: lastWeek)!.events.count
         XCTAssertLessThan(abs((7.0 / 14.0) * 1_000 - Double(lastWeekEventCount)), 1)
         
         let twoWeeksAgo = KeystoneAnalyzer.weekInterval(before: lastWeek, weekStartsOnMonday: true)
-        let twoWeeksAgoEventCount = await analyzer.getProcessedEvents(in: twoWeeksAgo)!.count
+        let twoWeeksAgoEventCount = await analyzer.getProcessedEvents(in: twoWeeksAgo)!.events.count
         XCTAssertLessThan(abs((5.0 / 14.0) * 1_000 - Double(twoWeeksAgoEventCount)), 1)
         
         // Daily interval
         for i in 0..<14 {
             let day = eventInterval.start.addingTimeInterval(TimeInterval(i)*24*60*60)
             let interval = DateInterval(start: day.startOfDay, end: day.endOfDay)
-            let eventCount = await analyzer.getProcessedEvents(in: interval)!.count
+            let eventCount = await analyzer.getProcessedEvents(in: interval)!.events.count
             XCTAssertLessThan(abs((1.0 / 14.0) * 1_000 - Double(eventCount)), 1)
+        }
+    }
+    
+    func testChainingByGroupAggregator() async {
+        let config = KeystoneConfig(userIdentifier: "ABC")
+        let backend = MockBackend()
+        let delegate = MockDelegate()
+        let client = KeystoneClient(config: config, backend: backend)
+        
+        var builder = KeystoneAnalyzerBuilder(config: config, backend: backend, delegate: delegate)
+        builder.registerCategory(name: "testEvent") { category in
+            category.registerColumn(name: "group") { column in
+                column.registerAggregator(id: "Group Counter") {
+                    ChainingByGroupAggregator { CountingAggregator() }
+                }
+            }
+        }
+        
+        KeystoneAnalyzer.setNowDate(Self.date(from: "2023-01-25T23:59:59+0000"))
+        let events = [
+            client.createEvent(category: "testEvent", data: ["group": .text(value: "A"),]),
+            client.createEvent(category: "testEvent", data: ["group": .text(value: "A"),]),
+            client.createEvent(category: "testEvent", data: ["group": .text(value: "B"),]),
+            client.createEvent(category: "testEvent", data: ["group": .text(value: "C"),]),
+            client.createEvent(category: "testEvent", data: ["group": .text(value: "C"),]),
+            client.createEvent(category: "testEvent", data: ["group": .text(value: "C"),]),
+            client.createEvent(category: "testEvent", data: ["group": .text(value: "D"),]),
+            client.createEvent(category: "testEvent", data: ["group": .text(value: "D"),]),
+        ]
+        
+        KeystoneAnalyzer.setNowDate(Self.date(from: "2023-02-07T23:59:59+0000"))
+        backend.mockEvents = events
+        
+        let analyzer = try! await builder.build()
+        let aggregator = try! await analyzer.findAggregator(withId: "Group Counter", in: KeystoneAnalyzer.allEncompassingDateInterval)
+        let counter = aggregator as! ChainingByGroupAggregator
+        
+        XCTAssertEqual((counter.groupedAggregators[.text(value: "A")]! as! CountingAggregator).valueCount, 2)
+        XCTAssertEqual((counter.groupedAggregators[.text(value: "B")]! as! CountingAggregator).valueCount, 1)
+        XCTAssertEqual((counter.groupedAggregators[.text(value: "C")]! as! CountingAggregator).valueCount, 3)
+        XCTAssertEqual((counter.groupedAggregators[.text(value: "D")]! as! CountingAggregator).valueCount, 2)
+    }
+    
+    func testSearch() async {
+        let config = KeystoneConfig(userIdentifier: "ABC", createSearchIndex: true)
+        let backend = MockBackend()
+        let delegate = MockDelegate()
+        let client = KeystoneClient(config: config, backend: backend)
+        
+        let builder = KeystoneAnalyzerBuilder(config: config, backend: backend, delegate: delegate)
+        
+        KeystoneAnalyzer.setNowDate(Self.date(from: "2023-01-25T23:59:59+0000"))
+        let events = [
+            client.createEvent(category: "testEvent", data: ["id": .number(value: 1), "message": .text(value: "the quick"),]),
+            client.createEvent(category: "testEvent", data: ["id": .number(value: 2), "messages": .text(value: "brown fox"),]),
+            client.createEvent(category: "testEvent", data: ["id": .number(value: 3), "message": .text(value: "jumps over the"),]),
+            client.createEvent(category: "testEvent", data: ["id": .number(value: 4), "messageX": .text(value: "lazy dog"),]),
+            client.createEvent(category: "testEvent", data: ["id": .number(value: 5), "message": .text(value: "In publishing and graphic design, Lorem ipsum is a placeholder text "),]),
+            client.createEvent(category: "testEvent", data: ["id": .number(value: 6), "messag3": .text(value: "commonly used to demonstrate the visual form of a document or a typeface"),]),
+            client.createEvent(category: "testEvent", data: ["id": .number(value: 7), "mess4g3": .text(value: "without relying on meaningful content."),]),
+            client.createEvent(category: "testEvent", data: ["id": .number(value: 8), "message": .text(value: """
+The Lorem ipsum text is derived from sections 1.10.32 and 1.10.33 of Cicero's 'De finibus bonorum et malorum'.
+"""),]),
+        ]
+        
+        let tests: [(String, Set<Int>)] = [
+            ("", [1,2,3,4,5,6,7,8]),
+            ("mess", []),
+            
+            ("xxx", []),
+            ("jumps over the lazy dog", []),
+            
+            ("fo", [2, 6]),
+            ("fox", [2]),
+            ("FOX", [2]),
+            ("brown fox", [2]),
+            ("bro fo", [2]),
+            ("bRo Fo", [2]),
+            
+            ("jumps over t", [3]),
+            ("jumps OVER the", [3]),
+            ("jumps the", [3]),
+            ("jumps ThE over", [3]),
+            ("over ju", [3]),
+            
+            ("design,", [5]),
+            
+            ("and", [5, 8]),
+            ("is", [5, 8]),
+            
+            ("re", [7]),
+            ("me content.", [7]),
+            
+            ("1.10", [8]),
+            ("de 1.10", [8]),
+            ("Cic", [8]),
+            ("cicero'", [8]),
+        ]
+        
+        KeystoneAnalyzer.setNowDate(Self.date(from: "2023-02-07T23:59:59+0000"))
+        backend.mockEvents = events
+        
+        let analyzer = try! await builder.build()
+        let eventList = await analyzer.getProcessedEvents(in: KeystoneAnalyzer.interval(before: KeystoneAnalyzer.currentEventInterval))!
+        
+        XCTAssertEqual(eventList.events.count, events.count)
+        
+        let predicate = eventList.searchPredicate
+        for (keyword, expectedIds) in tests {
+            let ids = Set(eventList.events.filter { predicate(keyword, $0) }.map { Int($0.data["id"]!.numericValue!) })
+            XCTAssertEqual(ids, expectedIds, "search failed for keyword \(keyword)")
         }
     }
 }

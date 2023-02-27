@@ -23,6 +23,9 @@ public enum AnalyzerStatus {
     
     /// The analyzer is processing events.
     case processingEvents(progress: Double, detail: String? = nil)
+    
+    /// The search index is being updated.
+    case updatingSearchIndex(progress: Double)
 }
 
 fileprivate struct AggregatorProcessingInfo {
@@ -33,7 +36,7 @@ fileprivate struct AggregatorProcessingInfo {
     let interval: DateInterval?
 }
 
-/// Responsible for event processing, persistence, and aggregator state management.
+/// Responsible for event processing, persistence, and search, as well as aggregator state management.
 ///
 /// A `KeystoneAnalyzer` serves as the interface to the ``EventAggregator`` instances used to process your events.
 /// You can create a `KeystoneAnalyzer` with the ``KeystoneAnalyzerBuilder`` helper struct. It allows you to
@@ -68,12 +71,31 @@ fileprivate struct AggregatorProcessingInfo {
 ///     in: KeystoneAnalyzer.currentEventInterval)
 /// ```
 ///
+/// Querying the analyzer can take some time, especially if there are multiple thousands of events to process.
+/// `KeystoneAnalyzer` periodically calls the delegate's ``KeystoneDelegate/statusChanged(to:)-8o993``
+/// method to inform it about the current processing status. While the analyzer's processing takes place on a background thread,
+/// this method is always called on the main actor and can be used to update the UI in your App, for example to inform
+/// the user about the current status.
+///
 /// You can also fetch a list of events that were submitted within a given time interval.
 ///
 /// ```swift
 /// let todaysEvents = try await analyzer.getProcessedEvents(
 ///     in: KeystoneAnalyzer.dayInterval(containing: .now))
 /// ```
+///
+/// If ``KeystoneConfig/createSearchIndex`` is `true`, the result of ``KeystoneAnalyzer/getProcessedEvents(in:)``
+/// contains a search index that can be used for efficient keyword searches in an event list.
+///
+/// ```swift
+/// let searchPredicate = todaysEvents.searchPredicate
+/// // Search for events whose data contains the words 'search' and 'term'
+/// let seachResult = todaysEvents.events.filter { searchPredicate("search term", $0) }
+/// ```
+///
+/// You can tell the analyzer how to find keywords in your events by specifying the ``KeystoneConfig/getSearchKeywords`` closure.
+/// If you do not provide a custom closure, the analyzer will use all data items of type
+/// ``KeystoneEventData/text(value:)-swift.enum.case`` as search keywords.
 @MainActor public final class KeystoneAnalyzer {
     /// The current status.
     var status: AnalyzerStatus
@@ -513,7 +535,7 @@ extension KeystoneAnalyzer {
         }
         
         // Use as many events from cache as possible
-        if var cachedEvents = await self.getProcessedEvents(in: interval), !cachedEvents.isEmpty {
+        if var cachedEvents = await self.getProcessedEvents(in: interval)?.events, !cachedEvents.isEmpty {
             config.log?(.debug, "loaded \(cachedEvents.count) events from cache")
             
             let cachedEventsInterval = DateInterval(start: cachedEvents.first!.date, end: cachedEvents.last!.date)
@@ -567,7 +589,7 @@ extension KeystoneAnalyzer {
         intervals.append(state.currentState.interval)
         
         // Register the events we saved from before the reset
-        guard let allEvents = await self.getProcessedEvents(in: Self.allEncompassingDateInterval) else {
+        guard let allEvents = await self.getProcessedEvents(in: Self.allEncompassingDateInterval)?.events else {
             config.log?(.debug, "updating new aggregators: no events found")
             return
         }
@@ -583,7 +605,7 @@ extension KeystoneAnalyzer {
                                                       allEventsAggregators: allEventAggregators)
         
         let state = IntervalAggregatorState(interval: interval, aggregators: aggregators)
-        guard let events = await self.getProcessedEvents(in: interval) else {
+        guard let events = await self.getProcessedEvents(in: interval)?.events else {
             return state
         }
         
@@ -796,7 +818,7 @@ extension KeystoneAnalyzer {
 #else
 
 extension KeystoneAnalyzer {
-    static var now: Date { Date.now }
+    nonisolated static var now: Date { Date.now }
 }
 
 #endif
@@ -820,11 +842,30 @@ extension KeystoneAnalyzer {
             return
         }
         
+        let persist: ([KeystoneEvent], DateInterval, KeystoneSearchIndex?) async -> Void = { events, interval, existingIndex in
+            let searchIndex: KeystoneSearchIndex?
+            if self.config.createSearchIndex, !events.isEmpty {
+                if let existingIndex {
+                    searchIndex = await self.updateSearchIndex(searchIndex: existingIndex, events: events)
+                }
+                else {
+                    searchIndex = await self.createSearchIndex(for: events)
+                }
+            }
+            else {
+                searchIndex = nil
+            }
+            
+            let list = KeystoneEventList(interval: interval, events: events, searchIndex: searchIndex)
+            await self.delegate.persist(list, withKey: Self.eventsKey(for: interval))
+        }
+        
         var processedEventCount = 0
         let totalEventCount = events.count
         
         var currentInterval: DateInterval = Self.interval(containing: events[0].date)
-        var currentIntervalEvents = await self.getProcessedEvents(in: currentInterval) ?? []
+        var currentIntervalEventList = await self.getProcessedEvents(in: currentInterval)
+        var currentIntervalEvents = currentIntervalEventList?.events ?? []
         
         var currentIntervalEventCount = currentIntervalEvents.count
         var currentIntervalEventIds = Set(currentIntervalEvents.map { $0.id })
@@ -837,11 +878,13 @@ extension KeystoneAnalyzer {
             if eventInterval != currentInterval {
                 // Only persist if there were changes
                 if currentIntervalEventCount != currentIntervalEvents.count {
-                    await delegate.persist(currentIntervalEvents, withKey: Self.eventsKey(for: currentInterval))
+                    await persist(currentIntervalEvents, currentInterval, currentIntervalEventList?.searchIndex)
                 }
                 
                 currentInterval = eventInterval
-                currentIntervalEvents = await self.getProcessedEvents(in: currentInterval) ?? []
+                currentIntervalEventList = await self.getProcessedEvents(in: currentInterval)
+                currentIntervalEvents = currentIntervalEventList?.events ?? []
+                
                 currentIntervalEventCount = currentIntervalEvents.count
                 currentIntervalEventIds = Set(currentIntervalEvents.map { $0.id })
             }
@@ -853,49 +896,49 @@ extension KeystoneAnalyzer {
             currentIntervalEvents.append(event)
         }
         
-        await delegate.persist(currentIntervalEvents, withKey: Self.eventsKey(for: currentInterval))
+        await persist(currentIntervalEvents, currentInterval, currentIntervalEventList?.searchIndex)
     }
     
     /// Fetch the events in the given interval from the delegate.
     ///
     /// - Parameter interval: The interval within which to fetch events.
     /// - Returns: The events fetched from the delegate, or `nil` if they were not found.
-    public func getProcessedEvents(in interval: DateInterval) async -> [KeystoneEvent]? {
+    public func getProcessedEvents(in interval: DateInterval) async -> KeystoneEventList? {
         if Self.isNormalized(interval) && interval != Self.allEncompassingDateInterval {
-            return await delegate.load([KeystoneEvent].self, withKey: Self.eventsKey(for: interval))
+            return await delegate.load(KeystoneEventList.self, withKey: Self.eventsKey(for: interval))
         }
-
+        
         let previousStatus = self.status
         await updateStatus(.fetchingEvents(count: 0, source: "cache"))
         
         let interval = DateInterval(start: max(interval.start, self.state.processedEventInterval.start),
                                     end: min(interval.end, self.state.processedEventInterval.end))
         
-        var allEvents = [KeystoneEvent]()
+        var allEvents = [KeystoneEventList]()
         var currentInterval = Self.interval(containing: interval.end)
         var foundAnyEvents = false
         
         while currentInterval.end > interval.start {
             defer { currentInterval = Self.interval(before: currentInterval) }
             
-            guard let events = await delegate.load([KeystoneEvent].self, withKey: Self.eventsKey(for: currentInterval)) else {
+            guard let eventList = await delegate.load(KeystoneEventList.self, withKey: Self.eventsKey(for: currentInterval)) else {
                 continue
             }
             
             foundAnyEvents = true
-            allEvents.append(contentsOf: events)
+            allEvents.append(eventList)
             
             await updateStatus(.fetchingEvents(count: allEvents.count, source: "cache"))
         }
-        
-        allEvents = allEvents.filter { interval.contains($0.date) }.sorted { $0.date < $1.date }
-        await updateStatus(previousStatus)
         
         guard foundAnyEvents else {
             return nil
         }
         
-        return allEvents
+        let combinedList = await KeystoneEventList.create(combining: allEvents, in: interval) { await self.updateStatus($0) }
+        await updateStatus(previousStatus)
+        
+        return combinedList
     }
 }
 
@@ -1000,6 +1043,9 @@ extension AnalyzerStatus {
         case .persistingEvents(let progress):
             guard case .persistingEvents(let progress_) = rhs else { return true }
             guard abs(progress - progress_) >= 0.01 else { return false }
+        case .updatingSearchIndex(let progress):
+            guard case .updatingSearchIndex(let progress_) = rhs else { return true }
+            guard abs(progress - progress_) >= 0.01 else { return false }
         case .initializingState:
             guard case .initializingState = rhs else {
                 return true
@@ -1020,7 +1066,8 @@ extension AnalyzerStatus {
 
 extension AnalyzerStatus {
     enum CodingKeys: String {
-        case ready, initializingState, persistingEvents, persistingState, fetchingEvents, decodingEvents, processingEvents
+        case ready, initializingState, persistingEvents, persistingState, fetchingEvents,
+             decodingEvents, processingEvents, updatingSearchIndex
     }
     
     var codingKey: CodingKeys {
@@ -1032,6 +1079,7 @@ extension AnalyzerStatus {
         case .fetchingEvents: return .fetchingEvents
         case .decodingEvents: return .decodingEvents
         case .processingEvents: return .processingEvents
+        case .updatingSearchIndex: return .updatingSearchIndex
         }
     }
 }
@@ -1061,6 +1109,9 @@ extension AnalyzerStatus: Equatable {
             guard case .processingEvents(let progress_, let detail_) = rhs else { return false }
             guard detail == detail_ else { return false }
             guard progress == progress_ else { return false }
+        case .updatingSearchIndex(let progress):
+            guard case .updatingSearchIndex(let progress_) = rhs else { return false }
+            guard progress == progress_ else { return false }
         default: break
         }
         
@@ -1083,6 +1134,9 @@ extension AnalyzerStatus: Hashable {
             hasher.combine(progress)
             hasher.combine(source)
         case .processingEvents(let progress, let detail):
+            hasher.combine(progress)
+            hasher.combine(detail)
+        case .updatingSearchIndex(let progress):
             hasher.combine(progress)
             hasher.combine(detail)
         default: break

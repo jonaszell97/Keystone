@@ -4,6 +4,9 @@
 @MainActor public protocol KeystoneDelegate {
     /// Called whenever the status of the analyzer changes.
     ///
+    /// This method is always called on the main actor and can be used to update the UI in your App,
+    /// for example to inform the user about the current status.
+    ///
     /// - Parameter state: The new state.
     func statusChanged(to state: AnalyzerStatus) async
     
